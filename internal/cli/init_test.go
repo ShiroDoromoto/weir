@@ -62,6 +62,12 @@ func TestInitWritesAConfigWeirCanRead(t *testing.T) {
 	if len(cfg.Repos) != 0 {
 		t.Errorf("the template registers %d repositories, want none", len(cfg.Repos))
 	}
+	// The template shows how to write a rule, which means it holds rules as
+	// text. None of them may be live: an example that loads is a rule the
+	// reader never chose, matching from the moment they ran init.
+	if got := cfg.DefaultRules(); len(got) != 0 {
+		t.Errorf("the template carries %d live rules, want none", len(got))
+	}
 }
 
 // Same property on the other file: every line is commented out, so a fresh
