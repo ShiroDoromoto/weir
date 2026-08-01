@@ -186,16 +186,11 @@ func TestPathMatchesPath(t *testing.T) {
 	}
 }
 
-// Each kind is asked its own question. A rule answers no to the other one
-// rather than being stretched to cover it — a word standing in for a filename,
-// or a glob read out of a diff, would be weir matching against something nobody
-// wrote a rule for.
-func TestEachKindAnswersOnlyItsOwnQuestion(t *testing.T) {
-	word := mustCompile(t, Rule{Kind: Literal, Action: Block, Value: "secrets"})
-	if word.MatchesPath("secrets") {
-		t.Error("a literal rule matched a path, want it to match text only")
-	}
-
+// A pattern is written about the shape of something, and a glob about where
+// something is. Neither is stretched to cover the other's question: a glob read
+// out of a diff, or a regular expression tried against a filename, would be
+// weir matching against something nobody wrote a rule for.
+func TestAKindIsNotStretchedToCoverAnother(t *testing.T) {
 	pattern := mustCompile(t, Rule{Kind: Pattern, Action: Block, Value: `secrets/.*\.pem`})
 	if pattern.MatchesPath("secrets/server.pem") {
 		t.Error("a pattern rule matched a path, want it to match text only")
@@ -204,6 +199,39 @@ func TestEachKindAnswersOnlyItsOwnQuestion(t *testing.T) {
 	glob := mustCompile(t, Rule{Kind: Path, Action: Block, Value: "secrets/**"})
 	if glob.MatchesText("secrets/server.pem を追加した") {
 		t.Error("a path rule matched text, want it to match paths only")
+	}
+}
+
+// A word is the exception, and the reason is what the words are: names that
+// must not leave. One does not become allowed by being the name of a file, so
+// the same word is asked of the path as of the lines.
+func TestLiteralMatchesPathsToo(t *testing.T) {
+	word := mustCompile(t, Rule{Kind: Literal, Action: Block, Value: "山田太郎"})
+
+	for _, tt := range []struct {
+		path string
+		want bool
+	}{
+		// The case this exists for: the name is in the filename and in no line
+		// of the diff, so nothing else would have caught it.
+		{"docs/山田太郎-履歴書.pdf", true},
+		{"山田太郎.md", true},
+		{"docs/README.md", false},
+		// A word is still one word. Another spelling of the same name is a
+		// different string and is not matched — it is its own line in the
+		// denylist, here as much as in text.
+		{"docs/yamada-taro-rirekisho.pdf", false},
+	} {
+		if got := word.MatchesPath(tt.path); got != tt.want {
+			t.Errorf("MatchesPath(%q) = %v, want %v", tt.path, got, tt.want)
+		}
+	}
+
+	// Case is ignored in a path exactly as it is in a line — one word, one
+	// answer, whichever it is asked about.
+	roman := mustCompile(t, Rule{Kind: Literal, Action: Block, Value: "Contoso"})
+	if !roman.MatchesPath("docs/CONTOSO-plan.md") {
+		t.Error("a word did not match a path in another case, want case ignored")
 	}
 }
 
@@ -257,6 +285,39 @@ func TestCompileAllKeepsTheOrderItWasGiven(t *testing.T) {
 	for i, m := range matchers {
 		if m.Rule != rules[i] {
 			t.Errorf("matcher %d is %+v, want %+v", i, m.Rule, rules[i])
+		}
+	}
+}
+
+// A refusal names where it matched, and where is often a path. A word matched
+// against a path means the name is written in that path, so printing it would
+// put the name in the terminal — the one place the denylist exists to keep it
+// out of.
+func TestRedactTakesTheWordOutOfWhatIsPrinted(t *testing.T) {
+	word := mustCompile(t, Rule{Kind: Literal, Action: Block, Value: "山田太郎"})
+
+	got := word.Redact("docs/山田太郎-履歴書.md")
+	if strings.Contains(got, "山田太郎") {
+		t.Errorf("Redact() = %q, want the word gone", got)
+	}
+	// What is left is what the reader finds the file by.
+	if !strings.Contains(got, "docs/") || !strings.Contains(got, "履歴書.md") {
+		t.Errorf("Redact() = %q, want the rest of the path kept", got)
+	}
+}
+
+// A regular expression and a glob are shapes, not things to keep in. A path
+// with its glob taken out would name nothing, and the reader would be told a
+// rule matched somewhere they cannot find.
+func TestRedactLeavesTheOtherKindsAlone(t *testing.T) {
+	const path = "secrets/server.pem"
+
+	for _, r := range []Rule{
+		{Kind: Pattern, Action: Block, Value: `secrets/.*\.pem`},
+		{Kind: Path, Action: Block, Value: "secrets/**"},
+	} {
+		if got := mustCompile(t, r).Redact(path); got != path {
+			t.Errorf("Redact() with a %s rule = %q, want %q unchanged", r.Kind, got, path)
 		}
 	}
 }

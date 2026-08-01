@@ -23,9 +23,14 @@ import (
 type Kind string
 
 const (
-	// Literal is a word. It matches anywhere in the text, ignoring case: a
-	// name turns up inflected, and joined to other words, so a word boundary
-	// would miss it.
+	// Literal is a word. It matches anywhere in the text and anywhere in a
+	// path the commit changes, ignoring case: a name turns up inflected, and
+	// joined to other words, so a word boundary would miss it — and it turns
+	// up in filenames as often as in lines.
+	//
+	// It is the one kind matched against both. The words live in a file of
+	// their own, holding the names that must not leave; a name that must not
+	// leave does not become allowed by being the name of a file.
 	Literal Kind = "literal"
 	// Pattern is a regular expression, in Go's own dialect (RE2). No
 	// backreferences, no lookahead — and no catastrophic backtracking, which
@@ -159,17 +164,51 @@ func (m Matcher) MatchesText(text string) bool {
 	return m.re.MatchString(text)
 }
 
+// Redacted is what stands in for a word weir will not print.
+const Redacted = "…"
+
+// Redact takes this rule's word out of a string weir is about to print, and
+// leaves everything else where it was.
+//
+// A refusal names where it matched, and where is often a path. Now that a word
+// is matched against paths, a path can be the thing the word is written in —
+// and printing it would put the name in the terminal, the scrollback and
+// whatever is reading the output, which is the one place it was being kept out
+// of. What is left of the path is what the reader finds the file by.
+//
+// Only a word is taken out. A regular expression and a glob are shapes, not
+// things to keep in, and a path with its glob taken out would name nothing.
+func (m Matcher) Redact(s string) string {
+	if m.Rule.Kind != Literal {
+		return s
+	}
+	return m.re.ReplaceAllString(s, Redacted)
+}
+
 // MatchesPath reports whether this rule matches a path the commit changes.
 //
-// Only a path rule says yes here. A word is matched against text wherever it
-// appears; having it stand for a filename as well would be weir deciding a rule
-// means something its writer did not write.
+// A path rule says yes by its glob. A word says yes the same way it does in
+// text, because a name turns up in filenames as readily as in lines —
+// yamada-taro-rirekisho.pdf carries it as plainly as any sentence would. A word
+// rule that read the lines and not the name of the file they were in would let
+// that commit through, and the person who wrote the name down would never learn
+// it had.
+//
+// A pattern rule says no. It is written about the shape of something, and a
+// shape worth refusing — an issued key, a token — does not turn up in a path;
+// what would turn up is a loose expression matching a directory nobody meant.
+// Where a path is the thing being written about, that is what the path kind is
+// for.
 func (m Matcher) MatchesPath(path string) bool {
-	if m.Rule.Kind != Path {
+	switch m.Rule.Kind {
+	case Path:
+		// The pattern was read when this was compiled, so the only error Match
+		// returns is one that cannot arrive here.
+		ok, _ := doublestar.Match(m.Rule.Value, path)
+		return ok
+	case Literal:
+		return m.re.MatchString(path)
+	default:
 		return false
 	}
-	// The pattern was read when this was compiled, so the only error Match
-	// returns is one that cannot arrive here.
-	ok, _ := doublestar.Match(m.Rule.Value, path)
-	return ok
 }

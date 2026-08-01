@@ -394,3 +394,66 @@ func TestNothingIsSaidWhenThereAreRules(t *testing.T) {
 		t.Errorf("stdout = %q, want no notice — there is a rule", stdout.String())
 	}
 }
+
+// A name turns up in filenames as readily as in lines, and a commit whose diff
+// holds nothing at all would go through if only the lines were read.
+func TestCommitIsRefusedByAWordInAFilename(t *testing.T) {
+	dir := newRepo(t)
+	if err := os.MkdirAll(filepath.Join(dir, "docs"), 0o755); err != nil {
+		t.Fatalf("could not make docs: %v", err)
+	}
+	// The name is in the path and nowhere else — not in the message, not in a
+	// line of the file.
+	name := filepath.Join("docs", "山田太郎-履歴書.md")
+	if err := os.WriteFile(filepath.Join(dir, name), []byte("面談は火曜です\n"), 0o644); err != nil {
+		t.Fatalf("could not write %s: %v", name, err)
+	}
+	gitIn(t, dir, "add", "docs")
+	withStore(t, fmt.Sprintf("[repos.weir]\npath = %q\n", dir), "山田太郎\n")
+
+	var stdout, stderr bytes.Buffer
+	code := Run([]string{"commit", "--repo", "weir", "--message", "資料を置いた"}, &stdout, &stderr)
+	if code != exitFailure {
+		t.Fatalf("exit code = %d, want %d (stderr: %s)", code, exitFailure, stderr.String())
+	}
+	if n := commitCount(t, dir); n != 0 {
+		t.Errorf("the repository has %d commits, want 0 — the refusal must stop the commit", n)
+	}
+
+	said := stderr.String()
+	// The refusal names the path so the reader can find the file — but the
+	// name is written in that path, and printing it would put it in the
+	// terminal, which is the one place the denylist exists to keep it out of.
+	if strings.Contains(said, "山田太郎") {
+		t.Errorf("stderr = %q, want the refusal not to print the word it is refusing over", said)
+	}
+	for _, want := range []string{"docs/", "履歴書.md", "denylist"} {
+		if !strings.Contains(said, want) {
+			t.Errorf("stderr = %q, want it to carry %q so the file can be found", said, want)
+		}
+	}
+}
+
+// The word is taken out of what is printed however the finding arose: a file
+// whose name holds a name, gaining a line that a different rule matches, would
+// otherwise have that name printed by the other rule's finding.
+func TestARefusalNeverPrintsAWordEvenViaAnotherRule(t *testing.T) {
+	dir := newRepo(t)
+	name := "山田太郎.md"
+	if err := os.WriteFile(filepath.Join(dir, name), []byte("AKIAIOSFODNN7EXAMPLE\n"), 0o644); err != nil {
+		t.Fatalf("could not write %s: %v", name, err)
+	}
+	gitIn(t, dir, "add", name)
+	withStore(t, fmt.Sprintf(
+		"[repos.weir]\npath = %q\n\n[[rules]]\ntype = \"pattern\"\nvalue = \"AKIA[0-9A-Z]{16}\"\naction = \"block\"\n",
+		dir), "山田太郎\n")
+
+	var stdout, stderr bytes.Buffer
+	code := Run([]string{"commit", "--repo", "weir", "--message", "鍵を置いた"}, &stdout, &stderr)
+	if code != exitFailure {
+		t.Fatalf("exit code = %d, want %d (stderr: %s)", code, exitFailure, stderr.String())
+	}
+	if strings.Contains(stderr.String(), "山田太郎") {
+		t.Errorf("stderr = %q, want the word gone whichever rule named the file", stderr.String())
+	}
+}

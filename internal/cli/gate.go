@@ -26,6 +26,13 @@ type finding struct {
 // than in the order the rules happen to be written.
 func judge(matchers []rule.Matcher, s scan.Surface) (blocked, warned []finding) {
 	add := func(r rule.Rule, where string) {
+		// Where is a path as often as not, and a path can have a word in it
+		// that weir is refusing this very commit for. Every rule gets a say,
+		// not only the one that matched: what must not be printed must not be
+		// printed, whichever rule brought the line about.
+		for _, m := range matchers {
+			where = m.Redact(where)
+		}
 		f := finding{rule: r, where: where}
 		if r.Action == rule.Block {
 			blocked = append(blocked, f)
