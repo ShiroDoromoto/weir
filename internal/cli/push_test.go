@@ -129,31 +129,125 @@ func TestPushWithoutAConfigurationPointsAtIt(t *testing.T) {
 	}
 }
 
-// With no upstream, weir cannot tell which commits a push would send, so it
+// With no destination weir cannot tell which commits a push would send, so it
 // does not run one. Plain git often refuses such a push itself — but with
 // push.autoSetupRemote it sends the branch instead, and weir would have passed
 // commits it never looked at.
+//
+// Each way of having no destination is asked for separately, because each one's
+// way out is a different thing to type. Telling someone with no remote at all
+// to set an upstream is advice they cannot follow.
 func TestPushRefusesWhenItCannotTellWhatWouldBeSent(t *testing.T) {
-	dir := newRepo(t)
-	cmd := exec.Command("git", "commit", "--message", "一つ目")
-	cmd.Dir = dir
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("git commit: %v\n%s", err, out)
-	}
-	withConfig(t, fmt.Sprintf("[repos.weir]\npath = %q\n", dir))
+	for _, c := range []struct {
+		name string
+		// setUp leaves the repository in the state under test.
+		setUp func(t *testing.T, dir string)
+		// wantFix is the command the reader is sent to.
+		wantFix string
+	}{
+		{
+			name:    "no remote at all",
+			setUp:   func(*testing.T, string) {},
+			wantFix: "git remote add",
+		},
+		{
+			name: "several remotes and nothing choosing one",
+			setUp: func(t *testing.T, dir string) {
+				for _, name := range []string{"origin", "other"} {
+					bare := filepath.Join(t.TempDir(), name+".git")
+					pushGit(t, dir, "init", "--bare", bare)
+					pushGit(t, dir, "remote", "add", name, bare)
+				}
+			},
+			wantFix: "pushRemote",
+		},
+		{
+			name: "not on a branch",
+			setUp: func(t *testing.T, dir string) {
+				pushGit(t, dir, "checkout", "--detach", "HEAD")
+			},
+			wantFix: "git switch",
+		},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			dir := newRepo(t)
+			pushGit(t, dir, "commit", "--message", "一つ目")
+			c.setUp(t, dir)
+			withConfig(t, fmt.Sprintf("[repos.weir]\npath = %q\n", dir))
 
-	var stdout, stderr bytes.Buffer
-	code := Run([]string{"push", "--repo", "weir"}, &stdout, &stderr)
-	if code != exitFailure {
-		t.Fatalf("exit code = %d, want %d", code, exitFailure)
+			var stdout, stderr bytes.Buffer
+			code := Run([]string{"push", "--repo", "weir"}, &stdout, &stderr)
+			if code != exitFailure {
+				t.Fatalf("exit code = %d, want %d (stderr: %s)", code, exitFailure, stderr.String())
+			}
+			// The three parts every refusal carries: what happened, what to do
+			// about it, and a line that works.
+			for _, want := range []string{"読み出せない", c.wantFix, "weir push --repo weir"} {
+				if !strings.Contains(stderr.String(), want) {
+					t.Errorf("stderr = %q, want it to carry %q", stderr.String(), want)
+				}
+			}
+		})
 	}
-	// The three parts every refusal carries: what happened, what to do about
-	// it, and a line that works.
-	for _, want := range []string{"upstream", "--set-upstream-to", pushExample} {
-		if !strings.Contains(stderr.String(), want) {
-			t.Errorf("stderr = %q, want it to carry %q", stderr.String(), want)
-		}
+}
+
+// With one remote and no upstream there is nothing to guess, so weir reads the
+// surface and hands the push to git — the push a person cannot avoid making,
+// since a branch gets its upstream by being pushed.
+//
+// Whether git then makes it is git's own answer, and weir does not restate it.
+// With push.autoSetupRemote it goes; without, git asks for --set-upstream and
+// says so itself. Either way weir is no longer the one in the way, which is the
+// whole point: a gate people have to walk around is not a gate.
+func TestPushWithoutAnUpstreamGetsAsFarAsGit(t *testing.T) {
+	for _, c := range []struct {
+		name     string
+		autoSet  string
+		wantCode int
+	}{
+		{name: "git will set the upstream itself", autoSet: "true", wantCode: exitOK},
+		{name: "git asks for it first", autoSet: "false", wantCode: exitFailure},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			dir := newRepo(t)
+			pushGit(t, dir, "commit", "--message", "一つ目")
+			bare := filepath.Join(t.TempDir(), "origin.git")
+			pushGit(t, dir, "init", "--bare", bare)
+			pushGit(t, dir, "remote", "add", "origin", bare)
+			pushGit(t, dir, "config", "push.autoSetupRemote", c.autoSet)
+			withConfig(t, fmt.Sprintf("[repos.weir]\npath = %q\n", dir))
+
+			var stdout, stderr bytes.Buffer
+			code := Run([]string{"push", "--repo", "weir"}, &stdout, &stderr)
+			if code != c.wantCode {
+				t.Fatalf("exit code = %d, want %d (stderr: %s)", code, c.wantCode, stderr.String())
+			}
+			// Whatever git decided, the refusal weir used to make is gone.
+			if strings.Contains(stderr.String(), "読み出せない") {
+				t.Errorf("stderr = %q, want weir to have read the surface", stderr.String())
+			}
+			if c.wantCode != exitOK {
+				return
+			}
+			// It landed: the bare repository now has the branch.
+			if out := pushGit(t, bare, "rev-parse", "--verify", "main"); out == "" {
+				t.Errorf("the remote has no main, so the push never reached it")
+			}
+		})
 	}
+}
+
+// pushGit runs one git command for these tests and answers with its output.
+func pushGit(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %s in %s: %v\n%s", strings.Join(args, " "), dir, err, out)
+	}
+	return strings.TrimSpace(string(out))
 }
 
 func TestPushHelpPrintsItsUsage(t *testing.T) {

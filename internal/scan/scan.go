@@ -41,16 +41,26 @@ type Text struct {
 // MessageWhere is what Where says for the commit message.
 const MessageWhere = "コミットメッセージ"
 
-// ErrNoUpstream is what Push answers with when nothing tells it which remote a
-// push would go to — no upstream on the branch, or no branch at all.
+// What Push answers with when nothing says which remote a push would go to.
+// None of them is "nothing to look at": with no destination weir cannot tell
+// which commits a push would send, and an empty surface would read as a clean
+// one.
 //
-// It is not "nothing to look at": with no destination weir cannot tell which
-// commits a push would send, and an empty surface would read as a clean one.
-// Plain git usually refuses such a push itself, but not always — with
-// push.autoSetupRemote it sends the branch and sets the upstream on the way —
-// so the caller is told the difference rather than handed a surface that looks
-// judged.
-var ErrNoUpstream = errors.New("このブランチには upstream がありません (何が送られるのかを読み出せません)")
+// They are three errors rather than one because the way out of each is a
+// different thing to type, and a refusal that cannot say which one is a refusal
+// the reader has to guess their way past.
+var (
+	// ErrDetachedHead is a HEAD that is on no branch, so there is nothing
+	// configured to push and nothing to fall back on either.
+	ErrDetachedHead = errors.New("いまブランチの上にいません (何が送られるのかを読み出せません)")
+	// ErrNoRemote is a repository with no remote at all — there is nowhere for
+	// a push to go, whatever the branch says.
+	ErrNoRemote = errors.New("リモートが1つもありません (何が送られるのかを読み出せません)")
+	// ErrManyRemotes is a branch with no destination of its own in a repository
+	// with several remotes. Picking one would be a guess, and a gate that
+	// guesses its destination measures against the wrong set of commits.
+	ErrManyRemotes = errors.New("送り先のリモートが決まりません (何が送られるのかを読み出せません)")
+)
 
 // Surface is what one command puts in front of the rules.
 type Surface struct {
@@ -98,6 +108,11 @@ func Commit(dir, message string, all bool) (Surface, error) {
 // of those refuses the push over something that left long ago, and there is
 // nothing the person can do about it. What is not on the remote yet is asked
 // directly instead.
+//
+// Which remote that is comes from the branch, and from the repository's only
+// remote when the branch says nothing — so a branch that has never been pushed
+// is still readable. What cannot be settled is answered with one of the three
+// errors above, never with an empty surface.
 //
 // The remote-tracking refs it asks against can be behind what the remote
 // actually holds, and weir does not fetch to close that: a gate that reaches
@@ -147,7 +162,8 @@ func Push(dir string) (Surface, error) {
 	return s, nil
 }
 
-// destinationOf names the remote a push from dir would go to.
+// destinationOf names the remote a push from dir would go to. A branch that
+// says nothing about where it pushes falls back to soleRemote.
 //
 // It asks for %(push:remotename) rather than %(upstream:remotename) because
 // those two are not the same remote. With branch.<name>.pushRemote or
@@ -163,12 +179,11 @@ func destinationOf(dir string) (string, error) {
 	if _, err := git(dir, "送り先", []string{"rev-parse", "--git-dir"}); err != nil {
 		return "", err
 	}
-	// A detached HEAD is not on a branch, so it has nothing configured to push
-	// to — the same answer as a branch with no upstream, arriving by a
-	// different road.
+	// A detached HEAD is not on a branch, so there is nothing configured to push
+	// to and no branch for a fallback to be about either.
 	branch, err := git(dir, "送り先", []string{"symbolic-ref", "--quiet", "--short", "HEAD"})
 	if err != nil {
-		return "", ErrNoUpstream
+		return "", ErrDetachedHead
 	}
 	// refs/heads/<branch> matches that branch and nothing else: for-each-ref
 	// only extends a pattern at a slash, and git will not let refs/heads/x and
@@ -180,11 +195,47 @@ func destinationOf(dir string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	remote := strings.TrimSpace(out)
-	if remote == "" {
-		return "", ErrNoUpstream
+	if remote := strings.TrimSpace(out); remote != "" {
+		return remote, nil
 	}
-	return remote, nil
+	// Nothing is configured for this branch — which is what every branch looks
+	// like before its first push. That is the one push a person cannot avoid
+	// making, so refusing it outright would send them around weir to make it.
+	return soleRemote(dir)
+}
+
+// soleRemote answers the destination of a branch that has none of its own: the
+// repository's remote, when it has exactly one.
+//
+// One remote is not a guess — there is nowhere else a push could go, and git
+// would pick the same one. Several is a guess, and measuring against the wrong
+// remote drops commits the real destination has never seen out of the surface.
+// So the count is what decides, and weir does not choose among them.
+//
+// Whether git will make the push is git's own question: without
+// push.autoSetupRemote it asks for --set-upstream first, and it says so better
+// than weir could. What weir answers here is only whether it has seen what
+// would be sent.
+func soleRemote(dir string) (string, error) {
+	out, err := git(dir, "送り先", []string{"remote"})
+	if err != nil {
+		return "", err
+	}
+
+	var remotes []string
+	for _, line := range strings.Split(out, "\n") {
+		if name := strings.TrimSpace(line); name != "" {
+			remotes = append(remotes, name)
+		}
+	}
+	switch len(remotes) {
+	case 0:
+		return "", ErrNoRemote
+	case 1:
+		return remotes[0], nil
+	default:
+		return "", ErrManyRemotes
+	}
 }
 
 // commit is one commit a push would send.

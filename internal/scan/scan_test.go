@@ -583,28 +583,81 @@ func TestPushWithNothingToSendIsEmpty(t *testing.T) {
 	}
 }
 
-// With no upstream weir cannot tell what would be sent. That is not the same as
-// finding nothing, and it must not be answered with an empty surface.
-func TestPushWithoutAnUpstreamSaysSo(t *testing.T) {
+// With no remote at all there is nowhere a push could go. That is not the same
+// as finding nothing, and it must not be answered with an empty surface.
+func TestPushWithNoRemoteSaysSo(t *testing.T) {
 	dir := newRepo(t)
 
 	_, err := Push(dir)
-	if !errors.Is(err, ErrNoUpstream) {
-		t.Fatalf("Push() = %v, want ErrNoUpstream", err)
+	if !errors.Is(err, ErrNoRemote) {
+		t.Fatalf("Push() = %v, want ErrNoRemote", err)
 	}
 }
 
-// A detached HEAD is on no branch, so nothing says where a push would go. Same
-// answer as no upstream — what it must not be is an empty surface, which would
-// read as a clean one.
+// The push a person cannot avoid making: a branch that has never been pushed
+// has no upstream, and pushing is how it gets one. With a single remote there
+// is nothing to guess, so weir reads the surface and lets the push through —
+// refusing it would send them around weir to make it.
+func TestPushWithoutAnUpstreamUsesTheOnlyRemote(t *testing.T) {
+	dir := newTracking(t)
+	gitIn(t, dir, "checkout", "-b", "topic")
+	commitFile(t, dir, "topic.txt", "NEVERPUSHED\n", "まだ送っていない")
+
+	s, err := Push(dir)
+	if err != nil {
+		t.Fatalf("Push() = %v, want the one remote to settle it", err)
+	}
+	if !strings.Contains(bodies(s), "NEVERPUSHED") {
+		t.Errorf("surface = %q, want the commits the only remote does not have", bodies(s))
+	}
+}
+
+// Several remotes and nothing saying which one: picking is a guess, and the
+// wrong guess measures against a remote that already has commits the real
+// destination has never seen. weir does not choose.
+func TestPushWithoutAnUpstreamAndSeveralRemotesSaysSo(t *testing.T) {
+	dir := newTracking(t)
+	other := filepath.Join(t.TempDir(), "other.git")
+	gitIn(t, dir, "init", "--bare", other)
+	gitIn(t, dir, "remote", "add", "other", other)
+	gitIn(t, dir, "checkout", "-b", "topic")
+	commitFile(t, dir, "topic.txt", "one\n", "まだ送っていない")
+
+	_, err := Push(dir)
+	if !errors.Is(err, ErrManyRemotes) {
+		t.Fatalf("Push() = %v, want ErrManyRemotes", err)
+	}
+}
+
+// A branch that does have an upstream is unaffected by how many remotes there
+// are: what it says wins, and the count is never consulted.
+func TestPushWithAnUpstreamIgnoresTheOtherRemotes(t *testing.T) {
+	dir := newTracking(t)
+	other := filepath.Join(t.TempDir(), "other.git")
+	gitIn(t, dir, "init", "--bare", other)
+	gitIn(t, dir, "remote", "add", "other", other)
+	commitFile(t, dir, "a.txt", "ONLYHERE\n", "幹で足した")
+
+	s, err := Push(dir)
+	if err != nil {
+		t.Fatalf("Push() = %v, want the branch's own upstream to settle it", err)
+	}
+	if !strings.Contains(bodies(s), "ONLYHERE") {
+		t.Errorf("surface = %q, want what the branch's own remote does not have", bodies(s))
+	}
+}
+
+// A detached HEAD is on no branch, so there is no branch for a fallback to be
+// about either. What it must not be is an empty surface, which would read as a
+// clean one.
 func TestPushOnADetachedHeadSaysSo(t *testing.T) {
 	dir := newTracking(t)
 	commitFile(t, dir, "a.txt", "one\ntwo\n", "一つ目")
 	gitIn(t, dir, "checkout", "--detach", "HEAD")
 
 	_, err := Push(dir)
-	if !errors.Is(err, ErrNoUpstream) {
-		t.Fatalf("Push() = %v, want ErrNoUpstream", err)
+	if !errors.Is(err, ErrDetachedHead) {
+		t.Fatalf("Push() = %v, want ErrDetachedHead", err)
 	}
 }
 
@@ -675,14 +728,16 @@ func TestPushMeasuresAgainstThePushRemoteNotTheFetchRemote(t *testing.T) {
 }
 
 // Outside a repository the answer is about the repository, not about a branch
-// that is not tracking anything.
+// or a remote that a repository would have had.
 func TestPushFailsOutsideARepository(t *testing.T) {
 	_, err := Push(t.TempDir())
 	if err == nil {
 		t.Fatal("Push() = nil, want an error")
 	}
-	if errors.Is(err, ErrNoUpstream) {
-		t.Errorf("error = %v, want it to be about the repository, not the upstream", err)
+	for _, wrong := range []error{ErrDetachedHead, ErrNoRemote, ErrManyRemotes} {
+		if errors.Is(err, wrong) {
+			t.Errorf("error = %v, want it to be about the repository, not %v", err, wrong)
+		}
 	}
 	if !strings.Contains(err.Error(), "git") {
 		t.Errorf("error = %q, want it to name what failed", err)
