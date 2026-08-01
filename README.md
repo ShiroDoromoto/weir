@@ -163,3 +163,10 @@ make build    # bin/weir を焼く
 ```
 
 CI も `make check` を呼びます。手元と CI で別のものは回しません。
+
+## ライセンス
+
+Apache License 2.0 — [LICENSE](LICENSE) を見てください。Copyright the weir authors.
+
+ライセンスが及ぶのはコードです。**weir という名前**には及びません。Apache-2.0 は商標の権利を
+与えないので、このコードを再配布するフォークは自分の名前を名乗ってください。
