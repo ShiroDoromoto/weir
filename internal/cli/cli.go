@@ -22,6 +22,7 @@ const usage = `weir — 設定に書かれた規則だけで、コミットと p
   weir <コマンド> [引数...]
 
 コマンド:
+  init       設定の雛形を作る
   commit     登録したリポジトリでコミットする
   push       登録したリポジトリでプッシュする
   repos      登録されているリポジトリを一覧する
@@ -37,6 +38,8 @@ func Run(args []string, stdout, stderr io.Writer) int {
 	}
 
 	switch args[0] {
+	case "init":
+		return runInit(args[1:], stdout, stderr)
 	case "commit":
 		return runCommit(args[1:], stdout, stderr)
 	case "push":

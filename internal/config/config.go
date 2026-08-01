@@ -10,8 +10,9 @@
 //     empty result. A gate that reads a broken configuration as "no rules"
 //     would open on exactly the day the configuration breaks.
 //
-// It only reads. Writing the configuration is the human's, and weir has no
-// subcommand that edits it.
+// It only reads. Writing the configuration is the human's: `weir init` lays
+// down a template when there is none, and nothing in weir edits a file that is
+// already there.
 package config
 
 import (
@@ -29,9 +30,14 @@ import (
 // Where the configuration lives. Not overridable: one path, so what weir read
 // is answerable without knowing how it was launched. Tests point HOME at a
 // temporary directory instead.
+//
+// The words to refuse live beside config.toml rather than inside it, so that
+// showing someone the configuration does not mean showing them the list of
+// names.
 const (
-	DirName  = ".weir"
-	FileName = "config.toml"
+	DirName      = ".weir"
+	FileName     = "config.toml"
+	DenylistName = "denylist"
 )
 
 // ErrNotFound reports that the configuration file is not there at all — told
@@ -68,6 +74,15 @@ func Path() (string, error) {
 		return "", err
 	}
 	return filepath.Join(dir, FileName), nil
+}
+
+// DenylistPath returns ~/.weir/denylist.
+func DenylistPath() (string, error) {
+	dir, err := Dir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, DenylistName), nil
 }
 
 // Load reads ~/.weir/config.toml.
