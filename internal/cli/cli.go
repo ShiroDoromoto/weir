@@ -25,6 +25,7 @@ const usage = `weir — 設定に書かれた規則だけで、コミットと p
 
 コマンド:
   check      フックからの入力を読み、止めるものだけを拒否する
+  repos      登録されているリポジトリを一覧する
   version    版を表示する
   help       この使い方を表示する
 `
@@ -83,6 +84,8 @@ func Run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	switch args[0] {
 	case "check":
 		return runCheck(args[1:], stdin, stdout, stderr)
+	case "repos":
+		return runRepos(args[1:], stdout, stderr)
 	case "version":
 		fmt.Fprintf(stdout, "weir %s\n", version.Version)
 		return exitOK
