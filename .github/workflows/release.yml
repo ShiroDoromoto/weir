@@ -51,20 +51,27 @@ jobs:
       # 署名は macOS の identity が要る。持っていないので飛ばす（wharfy は未署名を警告どまりで通す）。
       # 押さえている口（releases / script / goinstall / homebrew）は、どれも署名を要求しない。
 
+      # 上げ先は自分のリポジトリなので、Actions が渡す token で足りる（permissions の
+      # contents: write がその権限）。手で作った PAT を渡さない。
       - name: GitHub Release に上げる
         env:
-          GITHUB_TOKEN: ${{ secrets.WHARFY_GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: wharfy release --yes
 
+      # ここだけがリポジトリの外に出る。tap（ShiroDoromoto/homebrew-weir）は別リポジトリで、
+      # Actions が渡す token は走っているリポジトリにしか書けない。まだ無い tap を作るところ
+      # までやるので、リポジトリを作れる PAT が要る。
+      #
+      # 外に出る口を1つに絞ってあるのは、範囲が狭くなるからではなく（PAT の権限は変わらない）、
+      # どのステップが外へ出るのかを、ワークフローを読むだけで言えるようにするため。
       - name: 各チャネルへ配る
         env:
-          # tap は別リポジトリ（ShiroDoromoto/homebrew-weir）なので、Actions が渡す token では
-          # 届かない。まだ無い tap を作るところまでやるため、repo スコープの PAT が要る。
           GITHUB_TOKEN: ${{ secrets.WHARFY_GITHUB_TOKEN }}
         run: wharfy publish --yes
 
       # 配って終わりにしない。消費者の側から入れて、動くところまでを1周とする。
+      # 読むだけなので、ここも Actions の token で足りる。
       - name: 消費者側から入れて確かめる
         env:
-          GITHUB_TOKEN: ${{ secrets.WHARFY_GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: wharfy verify --install
