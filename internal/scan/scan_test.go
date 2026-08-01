@@ -447,6 +447,86 @@ func TestPushWithoutAnUpstreamSaysSo(t *testing.T) {
 	}
 }
 
+// A detached HEAD is on no branch, so nothing says where a push would go. Same
+// answer as no upstream — what it must not be is an empty surface, which would
+// read as a clean one.
+func TestPushOnADetachedHeadSaysSo(t *testing.T) {
+	dir := newTracking(t)
+	commitFile(t, dir, "a.txt", "one\ntwo\n", "一つ目")
+	gitIn(t, dir, "checkout", "--detach", "HEAD")
+
+	_, err := Push(dir)
+	if !errors.Is(err, ErrNoUpstream) {
+		t.Fatalf("Push() = %v, want ErrNoUpstream", err)
+	}
+}
+
+// The one this range used to get wrong. `<upstream>..HEAD` means "newer than
+// this branch's upstream", which sweeps in commits the remote already holds by
+// another ref — merge main into a topic branch and main's commits land in it.
+// Refusing over one of those refuses a push over something that left long ago,
+// and there is nothing to fix.
+func TestPushLeavesOutWhatTheRemoteAlreadyHasByAnotherRef(t *testing.T) {
+	dir := newTracking(t)
+	gitIn(t, dir, "checkout", "-b", "topic")
+	commitFile(t, dir, "topic.txt", "TOPICLINE\n", "枝で足した")
+	gitIn(t, dir, "push", "-u", "origin", "topic")
+
+	// main moves on and is pushed, so what it carries is already on the remote.
+	gitIn(t, dir, "checkout", "main")
+	commitFile(t, dir, "main.txt", "ALREADYSENT\n", "幹で足した")
+	gitIn(t, dir, "push", "origin", "main")
+
+	// Taking it into the topic branch does not send it a second time.
+	gitIn(t, dir, "checkout", "topic")
+	gitIn(t, dir, "merge", "--no-ff", "-m", "幹を取り込んだ", "main")
+
+	s, err := Push(dir)
+	if err != nil {
+		t.Fatalf("Push() = %v, want no error", err)
+	}
+	if strings.Contains(bodies(s), "ALREADYSENT") {
+		t.Errorf("surface = %q, want nothing from a commit the remote already has", bodies(s))
+	}
+	if strings.Contains(bodies(s), "幹で足した") {
+		t.Errorf("surface = %q, want no message from a commit the remote already has", bodies(s))
+	}
+	for _, p := range s.Paths {
+		if p == "main.txt" {
+			t.Errorf("Paths = %v, want no path from a commit the remote already has", s.Paths)
+		}
+	}
+	// The merge itself has not been sent, so it is still judged.
+	if !strings.Contains(bodies(s), "幹を取り込んだ") {
+		t.Errorf("surface = %q, want the merge commit's own message", bodies(s))
+	}
+}
+
+// Fetching from one remote and pushing to another is a configuration git
+// supports, and the two are different sets of commits. The surface has to be
+// measured against the one being pushed to: measuring against the fetch remote
+// would drop commits the destination has never seen, which is the direction
+// weir must not fail in.
+func TestPushMeasuresAgainstThePushRemoteNotTheFetchRemote(t *testing.T) {
+	dir := newTracking(t)
+	commitFile(t, dir, "sent.txt", "ONLYONORIGIN\n", "origin にだけ送ったもの")
+	gitIn(t, dir, "push", "origin", "main")
+
+	// A second remote that has never seen any of this, set as where main pushes.
+	other := filepath.Join(t.TempDir(), "other.git")
+	gitIn(t, dir, "init", "--bare", other)
+	gitIn(t, dir, "remote", "add", "other", other)
+	gitIn(t, dir, "config", "branch.main.pushRemote", "other")
+
+	s, err := Push(dir)
+	if err != nil {
+		t.Fatalf("Push() = %v, want no error", err)
+	}
+	if !strings.Contains(bodies(s), "ONLYONORIGIN") {
+		t.Errorf("surface = %q, want a commit the push remote does not have", bodies(s))
+	}
+}
+
 // Outside a repository the answer is about the repository, not about a branch
 // that is not tracking anything.
 func TestPushFailsOutsideARepository(t *testing.T) {

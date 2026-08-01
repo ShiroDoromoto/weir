@@ -8,10 +8,10 @@
 // refusing one — a refusal nobody can act on, since fixing it would mean
 // changing something the commit does not touch.
 //
-// For a push it is the commits the push would send, and no others: everything
-// between the current branch's upstream and HEAD, each one's message and each
-// one's own changes. A commit made with plain git never went past weir, so the
-// push is where it is seen; a commit already upstream is not being sent, and
+// For a push it is the commits the push would send, and no others: the ones the
+// destination remote does not have yet, each one's message and each one's own
+// changes. A commit made with plain git never went past weir, so the push is
+// where it is seen; a commit the remote already holds is not being sent, and
 // judging one would refuse a push over something that left long ago.
 //
 // Lines the commit removes are left out for the same reason. A commit that
@@ -41,10 +41,10 @@ type Text struct {
 // MessageWhere is what Where says for the commit message.
 const MessageWhere = "コミットメッセージ"
 
-// ErrNoUpstream is what Push answers with when the current branch has no
-// upstream.
+// ErrNoUpstream is what Push answers with when nothing tells it which remote a
+// push would go to — no upstream on the branch, or no branch at all.
 //
-// It is not "nothing to look at": with no upstream weir cannot tell which
+// It is not "nothing to look at": with no destination weir cannot tell which
 // commits a push would send, and an empty surface would read as a clean one.
 // Plain git usually refuses such a push itself, but not always — with
 // push.autoSetupRemote it sends the branch and sets the upstream on the way —
@@ -88,27 +88,37 @@ func Commit(dir, message string, all bool) (Surface, error) {
 	return s, nil
 }
 
-// Push assembles what `weir push` in dir would send: the commits between the
-// current branch's upstream and HEAD, oldest first, each with its message and
-// what it changes.
+// Push assembles what `weir push` in dir would send: the commits that are not
+// on the destination remote yet, oldest first, each with its message and what
+// it changes.
 //
-// The destination is git's own — the current branch's upstream — because that
-// is where a push with no arguments goes, and weir passes none. A branch with
-// no upstream answers ErrNoUpstream: what would be sent is not knowable, and
-// saying so is not the same as finding nothing.
+// Not `<upstream>..HEAD`. That range is "newer than this branch's upstream",
+// which is not the same set: merge main into a topic branch and main's commits
+// — already on the remote, by another ref — fall inside it. A rule matching one
+// of those refuses the push over something that left long ago, and there is
+// nothing the person can do about it. What is not on the remote yet is asked
+// directly instead.
+//
+// The remote-tracking refs it asks against can be behind what the remote
+// actually holds, and weir does not fetch to close that: a gate that reaches
+// for the network judges differently offline than on, and quietly rewrites
+// refs on its way. Being behind only ever adds commits to the surface — it
+// cannot drop one — so the drift falls on the refusing side.
 //
 // A merge commit contributes its message and nothing else. Its first-parent
-// diff is mostly work that is already upstream, and judging a push on that
+// diff is mostly work that is already on the remote, and judging a push on that
 // would refuse it over changes that left long ago; what the merge brings in
-// that is genuinely new is in the commits themselves, which are in this range
+// that is genuinely new is in the commits themselves, which are in this set
 // too.
 func Push(dir string) (Surface, error) {
-	upstream, err := upstreamOf(dir)
+	remote, err := destinationOf(dir)
 	if err != nil {
 		return Surface{}, err
 	}
 
-	commits, err := commitsIn(dir, upstream+"..HEAD")
+	// A trailing /* is what --remotes= means by a name with no glob in it.
+	// Writing it out keeps the pattern readable as the pattern it is.
+	commits, err := commitsIn(dir, "HEAD", "--not", "--remotes="+remote+"/*")
 	if err != nil {
 		return Surface{}, err
 	}
@@ -134,20 +144,44 @@ func Push(dir string) (Surface, error) {
 	return s, nil
 }
 
-// upstreamOf names where a push from dir would go.
-func upstreamOf(dir string) (string, error) {
+// destinationOf names the remote a push from dir would go to.
+//
+// It asks for %(push:remotename) rather than %(upstream:remotename) because
+// those two are not the same remote. With branch.<name>.pushRemote or
+// remote.pushDefault set, a branch fetches from one and pushes to another;
+// subtracting what is on the fetch remote would drop commits the push remote
+// has never seen out of the surface, which is the one direction weir must not
+// fail in.
+func destinationOf(dir string) (string, error) {
 	// Whether this is a repository at all is asked first, so a failure to
-	// answer the upstream question can only be about the upstream — and the
-	// caller outside a repository is told that, rather than being told its
+	// answer the destination question can only be about the destination — and
+	// the caller outside a repository is told that, rather than being told its
 	// branch is not tracking anything.
 	if _, err := git(dir, "送り先", []string{"rev-parse", "--git-dir"}); err != nil {
 		return "", err
 	}
-	out, err := git(dir, "送り先", []string{"rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"})
+	// A detached HEAD is not on a branch, so it has nothing configured to push
+	// to — the same answer as a branch with no upstream, arriving by a
+	// different road.
+	branch, err := git(dir, "送り先", []string{"symbolic-ref", "--quiet", "--short", "HEAD"})
 	if err != nil {
 		return "", ErrNoUpstream
 	}
-	return strings.TrimSpace(out), nil
+	// refs/heads/<branch> matches that branch and nothing else: for-each-ref
+	// only extends a pattern at a slash, and git will not let refs/heads/x and
+	// refs/heads/x/y both exist. So this is one line, or none.
+	out, err := git(dir, "送り先", []string{
+		"for-each-ref", "--format=%(push:remotename)",
+		"refs/heads/" + strings.TrimSpace(branch),
+	})
+	if err != nil {
+		return "", err
+	}
+	remote := strings.TrimSpace(out)
+	if remote == "" {
+		return "", ErrNoUpstream
+	}
+	return remote, nil
 }
 
 // commit is one commit a push would send.
@@ -158,14 +192,14 @@ type commit struct {
 	message string
 }
 
-// commitsIn lists the commits in a range, oldest first — the order they were
-// written, which is the order a reader looks for them in.
-func commitsIn(dir, rng string) ([]commit, error) {
+// commitsIn lists the commits a revision selection picks out, oldest first —
+// the order they were written, which is the order a reader looks for them in.
+func commitsIn(dir string, selection ...string) ([]commit, error) {
 	// NUL separates the entries. A commit message can hold any line at all,
 	// this one's own header included, so nothing that could be typed into one
 	// can be what the entries are split on.
 	const format = "--format=%x00%H %h %P%n%B"
-	out, err := git(dir, "送られるコミット", []string{"log", "--reverse", format, rng})
+	out, err := git(dir, "送られるコミット", append([]string{"log", "--reverse", format}, selection...))
 	if err != nil {
 		return nil, err
 	}
