@@ -45,6 +45,34 @@ settings.json の PreToolUse フックが weir check を呼んでいるか、
 weir check が受け取るのは、次の形の JSON です:
   {"cwd":"/path/to/repo","tool_name":"Bash","tool_input":{"command":"git commit -m ..."}}`
 
+// unreadableCommand is what the gate says when the command line will not come
+// apart into words. weir cannot see whether a commit or a push is in there, so
+// it stops for the same reason it stops unreadable hook input.
+const unreadableCommand = `weir はコマンドを読めませんでした（%v）。
+commit や push が含まれているのか判断できないため、止めています。
+
+開いたままの引用符を閉じて、もう一度実行してください。
+コミットや push のつもりだったのなら、weir から実行してください。
+
+  %s`
+
+// stoppedByTheGate is what the gate says when it stops plain git. It has to
+// carry three things — why it stopped, what to do instead, and a line that
+// works — or the reader is turned away without being told the way through.
+const stoppedByTheGate = `weir は素の git の %s を止めました。
+
+素の git は weir を通らないため、設定に書かれた規則との照合を受けないまま外へ出てしまいます。
+weir から実行してください。対象はパスではなく名前で指定します
+（名前は ~/.weir/config.toml の [repos.<名前>] に書かれているものです）。
+
+  %s`
+
+// The line to run instead, one per operation weir stops.
+const (
+	commitExample = `weir commit --repo <リポジトリ名> --message "変更の説明"`
+	pushExample   = `weir push --repo <リポジトリ名>`
+)
+
 // Run dispatches args (os.Args[1:]) and returns the process exit code.
 func Run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
@@ -80,16 +108,40 @@ func runCheck(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return exitUsage
 	}
 
-	if _, err := agent.Decode(stdin); err != nil {
-		if err := agent.WriteDenial(stdout, fmt.Sprintf(unreadableInput, err)); err != nil {
-			fmt.Fprintf(stderr, "weir check: 拒否を書き出せません: %v\n", err)
-			return exitFailure
-		}
+	reason, stop := judge(stdin)
+	if !stop {
+		// What weir does not stop, it says nothing about — the agent's own
+		// permission check is what decides to run it.
 		return exitOK
 	}
 
-	// Nothing is matched against the request yet, so nothing is stopped. What
-	// weir does not stop, it says nothing about — the agent's own permission
-	// check is what decides to run it.
+	if err := agent.WriteDenial(stdout, reason); err != nil {
+		fmt.Fprintf(stderr, "weir check: 拒否を書き出せません: %v\n", err)
+		return exitFailure
+	}
 	return exitOK
+}
+
+// judge reads one hook payload and answers with the reason to stop the call,
+// or with stop=false when weir has nothing to say about it. Everything it
+// cannot read, it stops on: not knowing what is about to run is not a reason
+// to let it run.
+func judge(stdin io.Reader) (reason string, stop bool) {
+	req, err := agent.Decode(stdin)
+	if err != nil {
+		return fmt.Sprintf(unreadableInput, err), true
+	}
+
+	op, err := hook.StoppedGitOperation(req.Command)
+	if err != nil {
+		return fmt.Sprintf(unreadableCommand, err, commitExample), true
+	}
+
+	switch op {
+	case hook.GitCommit:
+		return fmt.Sprintf(stoppedByTheGate, op, commitExample), true
+	case hook.GitPush:
+		return fmt.Sprintf(stoppedByTheGate, op, pushExample), true
+	}
+	return "", false
 }

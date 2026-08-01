@@ -84,10 +84,13 @@ func TestRun(t *testing.T) {
 	}
 }
 
-// Input weir cannot read is input weir cannot judge, so the gate closes.
-func TestRunCheckStopsUnreadableInput(t *testing.T) {
+// checkDenial runs check over payload and returns the reason it refused with,
+// failing the test if it did not refuse.
+func checkDenial(t *testing.T, payload string) string {
+	t.Helper()
+
 	var stdout, stderr bytes.Buffer
-	code := Run([]string{"check"}, strings.NewReader(`{"tool_name":`), &stdout, &stderr)
+	code := Run([]string{"check"}, strings.NewReader(payload), &stdout, &stderr)
 
 	if code != 0 {
 		t.Errorf("exit code = %d, want 0 — the judgement travels in the output, not the code", code)
@@ -108,13 +111,102 @@ func TestRunCheckStopsUnreadableInput(t *testing.T) {
 	if got.HookSpecificOutput.PermissionDecision != "deny" {
 		t.Fatalf("permissionDecision = %q, want %q", got.HookSpecificOutput.PermissionDecision, "deny")
 	}
+	return got.HookSpecificOutput.PermissionDecisionReason
+}
+
+// bashPayload is one Bash tool call, as Claude Code hands it to the hook.
+func bashPayload(t *testing.T, command string) string {
+	t.Helper()
+
+	payload, err := json.Marshal(map[string]any{
+		"cwd":       "/repo",
+		"tool_name": "Bash",
+		"tool_input": map[string]string{
+			"command": command,
+		},
+	})
+	if err != nil {
+		t.Fatalf("could not build the payload: %v", err)
+	}
+	return string(payload)
+}
+
+// Input weir cannot read is input weir cannot judge, so the gate closes.
+func TestRunCheckStopsUnreadableInput(t *testing.T) {
+	reason := checkDenial(t, `{"tool_name":`)
 
 	// A refusal has to carry the cause, the way out, and what a right call
 	// looks like — otherwise the reader is stopped without being told anything.
-	reason := got.HookSpecificOutput.PermissionDecisionReason
 	for _, want := range []string{"読めませんでした", "確認してください", "tool_input"} {
 		if !strings.Contains(reason, want) {
 			t.Errorf("reason = %q, want it to contain %q", reason, want)
+		}
+	}
+}
+
+func TestRunCheckStopsPlainGit(t *testing.T) {
+	tests := []struct {
+		name        string
+		command     string
+		wantCause   string
+		wantExample string
+	}{
+		{
+			name:        "a commit is sent back to weir commit",
+			command:     `git commit -m "wip"`,
+			wantCause:   "素の git の commit を止めました",
+			wantExample: "weir commit --repo",
+		},
+		{
+			name:        "a push is sent back to weir push",
+			command:     `git push --force`,
+			wantCause:   "素の git の push を止めました",
+			wantExample: "weir push --repo",
+		},
+		{
+			name:        "a command that will not come apart is stopped unread",
+			command:     `git commit -m "oops`,
+			wantCause:   "読めませんでした",
+			wantExample: "weir commit --repo",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			reason := checkDenial(t, bashPayload(t, tt.command))
+
+			if !strings.Contains(reason, tt.wantCause) {
+				t.Errorf("reason = %q, want it to say why: %q", reason, tt.wantCause)
+			}
+			if !strings.Contains(reason, "してください") {
+				t.Errorf("reason = %q, want it to say what to do next", reason)
+			}
+			if !strings.Contains(reason, tt.wantExample) {
+				t.Errorf("reason = %q, want it to show a line that works: %q", reason, tt.wantExample)
+			}
+		})
+	}
+}
+
+// What weir does not stop, it does not speak about — a read-only git included.
+func TestRunCheckPassesWhatItDoesNotStop(t *testing.T) {
+	for _, command := range []string{
+		`git status --short`,
+		`git log --oneline -5`,
+		`git rebase -i main`,
+		`gh pr create --fill`,
+		`weir commit --repo weir --message x`,
+		`echo 'git push --force'`,
+	} {
+		var stdout, stderr bytes.Buffer
+		code := Run([]string{"check"}, strings.NewReader(bashPayload(t, command)), &stdout, &stderr)
+
+		if code != 0 {
+			t.Errorf("Run(check) over %q = %d, want 0", command, code)
+		}
+		if stdout.Len() != 0 || stderr.Len() != 0 {
+			t.Errorf("Run(check) over %q wrote stdout=%q stderr=%q, want both empty",
+				command, stdout.String(), stderr.String())
 		}
 	}
 }
