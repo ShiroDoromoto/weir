@@ -14,6 +14,8 @@ package gitrepo
 import (
 	"errors"
 	"fmt"
+	"io/fs"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -61,6 +63,40 @@ func Root(dir string) (string, error) {
 	return root, nil
 }
 
+// CheckPath reports what stops path from being usable as a registered
+// repository, and nil when nothing does. Resolve simply skips a path like that
+// — refusing is its job, not explaining — so this is where the explaining
+// lives.
+func CheckPath(path string) error {
+	info, err := os.Stat(path)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return errors.New("そのパスがありません")
+		}
+		return fmt.Errorf("パスを確認できません: %w", err)
+	}
+	if !info.IsDir() {
+		return errors.New("ディレクトリではありません")
+	}
+
+	root, err := Root(path)
+	if err != nil {
+		return err
+	}
+	here, err := canonical(path)
+	if err != nil {
+		return fmt.Errorf("パスを解決できません: %w", err)
+	}
+	// A worktree is a working tree of its own, so everything above passes for
+	// one. weir acts on the repository proper, so registering a worktree would
+	// have weir working somewhere other than where it was pointed.
+	if root != here {
+		return fmt.Errorf(
+			"リポジトリ本体ではありません（本体は %s）。worktree ではなく本体の絶対パスを書いてください", root)
+	}
+	return nil
+}
+
 // Resolve answers which registered repository dir belongs to. A directory in an
 // unregistered repository is refused — being inside a git repository is not by
 // itself permission to act on it.
@@ -73,8 +109,7 @@ func Resolve(dir string, cfg *config.Config) (config.Repo, error) {
 	for _, name := range cfg.Names() {
 		repo := cfg.Repos[name]
 		// A registered path that cannot be canonicalised simply does not match.
-		// Saying why it does not is `weir config check`'s job; refusing is this
-		// one's.
+		// Refusing is this one's job; CheckPath is what says why.
 		registered, err := canonical(repo.Path)
 		if err != nil {
 			continue
