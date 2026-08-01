@@ -66,6 +66,26 @@ func rulesFor(cfg *config.Config, repoName string) ([]rule.Matcher, error) {
 	return rule.CompileAll(rules)
 }
 
+// noRules says that nothing is being matched against — every time, not once.
+//
+// A configuration with no rules in it is one weir can read and act on, so the
+// command goes through. What it must not do is go through quietly: silence
+// here reads exactly like a pass, and someone who never wrote a rule would go
+// on believing weir was holding something back.
+func noRules(stdout io.Writer, cmd string) {
+	fmt.Fprintf(stdout, "%s: 規則が0件です。何とも照合せずに通します。\n", cmd)
+
+	cfgPath, cfgErr := config.Path()
+	denyPath, denyErr := config.DenylistPath()
+	if cfgErr != nil || denyErr != nil {
+		// Unreachable: the configuration was just read out of those files.
+		fmt.Fprintln(stdout)
+		return
+	}
+	fmt.Fprintf(stdout, "  止めたいものがあるなら、%s に語を1行1語で、\n", denyPath)
+	fmt.Fprintf(stdout, "  %s に [[rules]] を書いてください。\n\n", cfgPath)
+}
+
 // warn shows what a warn rule found and says nothing about stopping, because
 // nothing is stopping. A rule that works by inference will misfire, and a
 // refusal that misfires is the one people learn to ignore.

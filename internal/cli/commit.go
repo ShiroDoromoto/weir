@@ -76,6 +76,10 @@ func runCommit(args []string, stdout, stderr io.Writer) int {
 		return exitFailure
 	}
 
+	if len(matchers) == 0 {
+		noRules(stdout, "weir commit")
+	}
+
 	// What would be committed is read before anything is committed. A gate that
 	// judges after the fact is not a gate.
 	surface, err := scan.Commit(repo.Path, *message, *all)

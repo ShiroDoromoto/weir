@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -247,5 +248,54 @@ func TestConfigCheckHelpIsNotAnError(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "weir config check") {
 		t.Errorf("stdout = %q, want the usage", stdout.String())
+	}
+}
+
+// A configuration with no rules passes the check — it is readable and weir can
+// act on it. What it must not do is pass silently: "問題はありません" on its own
+// would be read as "you are covered", which is the one thing it does not mean.
+func TestConfigCheckSaysWhenNothingWouldBeStopped(t *testing.T) {
+	dir := newTestRepo(t)
+	withConfig(t, fmt.Sprintf("[repos.weir]\npath = %q\n", dir))
+
+	var stdout, stderr bytes.Buffer
+	code := Run([]string{"config", "check"}, &stdout, &stderr)
+	said := stdout.String()
+	if code != exitOK {
+		t.Fatalf("exit code = %d, want %d — no rules is not a fault (stdout: %s)", code, exitOK, said)
+	}
+	if !strings.Contains(said, "何も止まりません") {
+		t.Errorf("stdout = %q, want it to say that nothing would be stopped", said)
+	}
+	for _, want := range []string{"denylist", "[[rules]]"} {
+		if !strings.Contains(said, want) {
+			t.Errorf("stdout = %q, want it to say where to write a rule (%q)", said, want)
+		}
+	}
+}
+
+// A repository carrying rules of its own is covered, even with no defaults at
+// all — so nothing is said about that one.
+func TestConfigCheckSaysNothingAboutARepositoryWithItsOwnRules(t *testing.T) {
+	dir := newTestRepo(t)
+	withConfig(t, fmt.Sprintf(`[repos.weir]
+path = %q
+
+[[repos.weir.rules]]
+type = "path"
+action = "block"
+value = "**/.env"
+`, dir))
+
+	var stdout, stderr bytes.Buffer
+	Run([]string{"config", "check"}, &stdout, &stderr)
+	said := stdout.String()
+	// The defaults are still empty, and that line still says so.
+	if !strings.Contains(said, "既定の規則 0件") {
+		t.Errorf("stdout = %q, want the defaults counted", said)
+	}
+	// But this repository is not one where nothing would be stopped.
+	if strings.Contains(said, "規則 1件（既定 0 + このリポジトリ 1） ⚠") {
+		t.Errorf("stdout = %q, want no warning against a repository that has a rule", said)
 	}
 }

@@ -74,6 +74,10 @@ func runPush(args []string, stdout, stderr io.Writer) int {
 		return exitFailure
 	}
 
+	if len(matchers) == 0 {
+		noRules(stdout, "weir push")
+	}
+
 	surface, err := scan.Push(repo.Path)
 	if errors.Is(err, scan.ErrNoUpstream) {
 		// git may well refuse this push itself — but not always, and weir

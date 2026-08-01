@@ -307,3 +307,90 @@ value = "AKIA[0-9A-Z]{16}"
 		t.Fatalf("exit code = %d, want %d (stderr: %s)", code, exitOK, stderr.String())
 	}
 }
+
+// No rules is a configuration weir can read, so the commit goes through — but
+// never quietly. Silence would read as a pass, and someone who has not written
+// a rule yet would go on believing weir was holding something back.
+func TestCommitWithNoRulesSaysSoAndGoesThrough(t *testing.T) {
+	dir := newRepo(t)
+	withConfig(t, fmt.Sprintf("[repos.weir]\npath = %q\n", dir))
+
+	var stdout, stderr bytes.Buffer
+	code := Run([]string{"commit", "--repo", "weir", "--message", "ふつうの変更"}, &stdout, &stderr)
+	if code != exitOK {
+		t.Fatalf("exit code = %d, want %d (stderr: %s)", code, exitOK, stderr.String())
+	}
+	if n := commitCount(t, dir); n != 1 {
+		t.Errorf("the repository has %d commits, want 1 — no rules is not a refusal", n)
+	}
+	said := stdout.String()
+	if !strings.Contains(said, "規則が0件") {
+		t.Errorf("stdout = %q, want it to say there is nothing to match against", said)
+	}
+	// And where to write one, or the reader is told a fact and no way to act on it.
+	for _, want := range []string{"denylist", "[[rules]]"} {
+		if !strings.Contains(said, want) {
+			t.Errorf("stdout = %q, want it to say where to write a rule (%q)", said, want)
+		}
+	}
+}
+
+func TestPushWithNoRulesSaysSoAndGoesThrough(t *testing.T) {
+	dir, _ := newTracking(t)
+	if err := os.WriteFile(filepath.Join(dir, "a.txt"), []byte("ふつうの行\n"), 0o644); err != nil {
+		t.Fatalf("could not write a.txt: %v", err)
+	}
+	gitIn(t, dir, "add", "a.txt")
+	gitIn(t, dir, "commit", "--message", "ふつうの変更")
+	withConfig(t, fmt.Sprintf("[repos.weir]\npath = %q\n", dir))
+
+	var stdout, stderr bytes.Buffer
+	code := Run([]string{"push", "--repo", "weir"}, &stdout, &stderr)
+	if code != exitOK {
+		t.Fatalf("exit code = %d, want %d (stderr: %s)", code, exitOK, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "規則が0件") {
+		t.Errorf("stdout = %q, want it to say there is nothing to match against", stdout.String())
+	}
+	local := strings.TrimSpace(gitIn(t, dir, "rev-parse", "HEAD"))
+	if sent := strings.TrimSpace(gitIn(t, dir, "rev-parse", "origin/main")); local != sent {
+		t.Errorf("origin/main is at %s, want the pushed %s", sent, local)
+	}
+}
+
+// It is said every time, not once. A notice that fades after the first run is
+// one nobody sees on the day it matters.
+func TestTheNoRulesNoticeIsSaidEveryTime(t *testing.T) {
+	dir := newRepo(t)
+	withConfig(t, fmt.Sprintf("[repos.weir]\npath = %q\n", dir))
+
+	for i, message := range []string{"一つ目", "二つ目"} {
+		if err := os.WriteFile(filepath.Join(dir, "a.txt"), []byte(message+"\n"), 0o644); err != nil {
+			t.Fatalf("could not write a.txt: %v", err)
+		}
+		gitIn(t, dir, "add", "a.txt")
+
+		var stdout, stderr bytes.Buffer
+		if code := Run([]string{"commit", "--repo", "weir", "--message", message}, &stdout, &stderr); code != exitOK {
+			t.Fatalf("commit %d: exit code = %d, want %d (stderr: %s)", i+1, code, exitOK, stderr.String())
+		}
+		if !strings.Contains(stdout.String(), "規則が0件") {
+			t.Errorf("commit %d: stdout = %q, want the notice again", i+1, stdout.String())
+		}
+	}
+}
+
+// With rules to match against, there is nothing to announce.
+func TestNothingIsSaidWhenThereAreRules(t *testing.T) {
+	dir := newRepo(t)
+	withStore(t, fmt.Sprintf("[repos.weir]\npath = %q\n", dir), "山田太郎\n")
+
+	var stdout, stderr bytes.Buffer
+	code := Run([]string{"commit", "--repo", "weir", "--message", "ふつうの変更"}, &stdout, &stderr)
+	if code != exitOK {
+		t.Fatalf("exit code = %d, want %d (stderr: %s)", code, exitOK, stderr.String())
+	}
+	if strings.Contains(stdout.String(), "規則が0件") {
+		t.Errorf("stdout = %q, want no notice — there is a rule", stdout.String())
+	}
+}

@@ -101,7 +101,15 @@ func runConfigCheck(args []string, stdout, stderr io.Writer) int {
 	// What applies everywhere, said once. A repository's own rules are added to
 	// these and can never take one away, so this line is the floor.
 	defaults := len(cfg.DefaultRules())
-	fmt.Fprintf(stdout, "  既定の規則 %d件（すべてのリポジトリに効きます）\n\n", defaults)
+	fmt.Fprintf(stdout, "  既定の規則 %d件（すべてのリポジトリに効きます）\n", defaults)
+	if defaults == 0 {
+		// Not a fault — a configuration with no rules is one weir can read, and
+		// it passes the check. But "問題はありません" on its own would be read
+		// as "you are covered", which is the one thing it does not mean.
+		fmt.Fprintf(stdout, "  ⚠ このままでは何も止まりません。%s に語を1行1語で、\n", denyPath)
+		fmt.Fprintf(stdout, "    %s に [[rules]] を書いてください。\n", path)
+	}
+	fmt.Fprintln(stdout)
 
 	names := cfg.Names()
 	if len(names) == 0 {
@@ -129,8 +137,15 @@ func runConfigCheck(args []string, stdout, stderr io.Writer) int {
 			fmt.Fprintf(w, "  \t✗ %v\n", err)
 			problems++
 		} else {
-			fmt.Fprintf(w, "  \t規則 %d件（既定 %d + このリポジトリ %d）\n",
-				len(rules), defaults, len(repo.Rules))
+			// A repository can carry rules of its own where there are no
+			// defaults, so the count that matters is this one — said per
+			// repository, and said when it is zero.
+			nothing := ""
+			if len(rules) == 0 {
+				nothing = " ⚠ 何も止まりません"
+			}
+			fmt.Fprintf(w, "  \t規則 %d件（既定 %d + このリポジトリ %d）%s\n",
+				len(rules), defaults, len(repo.Rules), nothing)
 		}
 		if err := gitrepo.CheckPath(repo.Path); err != nil {
 			fmt.Fprintf(w, "  \t✗ %v\n", err)
