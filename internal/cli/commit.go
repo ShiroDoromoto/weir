@@ -11,6 +11,9 @@ import (
 	"github.com/ShiroDoromoto/weir/internal/gitcmd"
 )
 
+// commitExample is the line every refusal ends with — the one that works.
+const commitExample = `weir commit --repo <リポジトリ名> --message "変更の説明"`
+
 const commitUsage = `weir commit — 登録したリポジトリでコミットする。
 
 使い方:

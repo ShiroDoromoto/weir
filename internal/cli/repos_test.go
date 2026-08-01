@@ -41,7 +41,7 @@ path = "/Users/someone/develop/notes"
 `)
 
 	var stdout, stderr bytes.Buffer
-	if code := Run([]string{"repos"}, strings.NewReader(""), &stdout, &stderr); code != exitOK {
+	if code := Run([]string{"repos"}, &stdout, &stderr); code != exitOK {
 		t.Fatalf("exit code = %d, want %d (stderr: %s)", code, exitOK, stderr.String())
 	}
 
@@ -64,7 +64,7 @@ func TestReposOnAnEmptyConfigSaysSo(t *testing.T) {
 	withConfig(t, "# 何も登録していない\n")
 
 	var stdout, stderr bytes.Buffer
-	if code := Run([]string{"repos"}, strings.NewReader(""), &stdout, &stderr); code != exitOK {
+	if code := Run([]string{"repos"}, &stdout, &stderr); code != exitOK {
 		t.Fatalf("exit code = %d, want %d (stderr: %s)", code, exitOK, stderr.String())
 	}
 	if !strings.Contains(stdout.String(), "ありません") {
@@ -90,7 +90,7 @@ func TestReposFailsOnAConfigItCannotRead(t *testing.T) {
 			withConfig(t, tt.body)
 
 			var stdout, stderr bytes.Buffer
-			code := Run([]string{"repos"}, strings.NewReader(""), &stdout, &stderr)
+			code := Run([]string{"repos"}, &stdout, &stderr)
 			if code != exitFailure {
 				t.Fatalf("exit code = %d, want %d", code, exitFailure)
 			}
@@ -110,7 +110,7 @@ func TestReposTakesNoArguments(t *testing.T) {
 	withConfig(t, "[repos.weir]\npath = \"/tmp/weir\"\n")
 
 	var stdout, stderr bytes.Buffer
-	if code := Run([]string{"repos", "weir"}, strings.NewReader(""), &stdout, &stderr); code != exitUsage {
+	if code := Run([]string{"repos", "weir"}, &stdout, &stderr); code != exitUsage {
 		t.Fatalf("exit code = %d, want %d", code, exitUsage)
 	}
 	if !strings.Contains(stderr.String(), "引数は取りません") {

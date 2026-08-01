@@ -52,7 +52,7 @@ func TestCommitCommitsInTheNamedRepository(t *testing.T) {
 
 	var stdout, stderr bytes.Buffer
 	code := Run([]string{"commit", "--repo", "weir", "--message", "門を通したコミット"},
-		strings.NewReader(""), &stdout, &stderr)
+		&stdout, &stderr)
 	if code != exitOK {
 		t.Fatalf("exit code = %d, want %d (stderr: %s)", code, exitOK, stderr.String())
 	}
@@ -67,7 +67,7 @@ func TestCommitWithAllTakesUnstagedChangesToo(t *testing.T) {
 
 	var stdout, stderr bytes.Buffer
 	code := Run([]string{"commit", "--repo", "weir", "--message", "一つ目"},
-		strings.NewReader(""), &stdout, &stderr)
+		&stdout, &stderr)
 	if code != exitOK {
 		t.Fatalf("exit code = %d, want %d (stderr: %s)", code, exitOK, stderr.String())
 	}
@@ -79,7 +79,7 @@ func TestCommitWithAllTakesUnstagedChangesToo(t *testing.T) {
 	stdout.Reset()
 	stderr.Reset()
 	code = Run([]string{"commit", "--repo", "weir", "--message", "二つ目", "--all"},
-		strings.NewReader(""), &stdout, &stderr)
+		&stdout, &stderr)
 	if code != exitOK {
 		t.Fatalf("exit code = %d, want %d (stderr: %s)", code, exitOK, stderr.String())
 	}
@@ -134,7 +134,7 @@ func TestCommitRefusesAndSaysHow(t *testing.T) {
 			withConfig(t, fmt.Sprintf("[repos.weir]\npath = %q\n", dir))
 
 			var stdout, stderr bytes.Buffer
-			code := Run(tt.args, strings.NewReader(""), &stdout, &stderr)
+			code := Run(tt.args, &stdout, &stderr)
 			if code != exitUsage {
 				t.Fatalf("exit code = %d, want %d (stderr: %s)", code, exitUsage, stderr.String())
 			}
@@ -159,7 +159,7 @@ func TestCommitWithoutAConfigurationPointsAtIt(t *testing.T) {
 
 	var stdout, stderr bytes.Buffer
 	code := Run([]string{"commit", "--repo", "weir", "--message", "x"},
-		strings.NewReader(""), &stdout, &stderr)
+		&stdout, &stderr)
 	if code != exitFailure {
 		t.Fatalf("exit code = %d, want %d", code, exitFailure)
 	}
@@ -183,7 +183,7 @@ func TestCommitFailsWhenThereIsNothingToCommit(t *testing.T) {
 
 	var stdout, stderr bytes.Buffer
 	code := Run([]string{"commit", "--repo", "weir", "--message", "空"},
-		strings.NewReader(""), &stdout, &stderr)
+		&stdout, &stderr)
 	if code != exitFailure {
 		t.Fatalf("exit code = %d, want %d", code, exitFailure)
 	}
@@ -194,7 +194,7 @@ func TestCommitFailsWhenThereIsNothingToCommit(t *testing.T) {
 
 func TestCommitHelpPrintsItsUsage(t *testing.T) {
 	var stdout, stderr bytes.Buffer
-	if code := Run([]string{"commit", "--help"}, strings.NewReader(""), &stdout, &stderr); code != exitOK {
+	if code := Run([]string{"commit", "--help"}, &stdout, &stderr); code != exitOK {
 		t.Fatalf("exit code = %d, want %d (stderr: %s)", code, exitOK, stderr.String())
 	}
 	if !strings.Contains(stdout.String(), "--all") {
