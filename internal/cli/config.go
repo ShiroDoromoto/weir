@@ -22,8 +22,11 @@ const configCheckUsage = `weir config check — 設定を検査して報告す�
   weir config check
 
 見るもの:
-  ~/.weir/config.toml が読めるか（構文・項目の綴り・path の形）
+  ~/.weir/config.toml が読めるか（構文・項目の綴り・path の形・規則の書き方）
+  ~/.weir/denylist が読めるか
   登録された各リポジトリが、そこに実在する git リポジトリの本体か
+
+各リポジトリに何件の規則が効くかも並べます。
 
 問題が1つでもあれば、非ゼロで終わります。
 `
@@ -75,7 +78,15 @@ func runConfigCheck(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "weir config check: %v\n", err)
 		return exitFailure
 	}
-	fmt.Fprintf(stdout, "設定: %s\n\n", path)
+	denyPath, err := config.DenylistPath()
+	if err != nil {
+		fmt.Fprintf(stderr, "weir config check: %v\n", err)
+		return exitFailure
+	}
+	// Both files, named before anything is read: what weir matched against is
+	// answerable only if the reader knows which files it came out of.
+	fmt.Fprintf(stdout, "設定: %s\n", path)
+	fmt.Fprintf(stdout, "語の一覧: %s\n\n", denyPath)
 
 	// The configuration failing to load is the check's answer, not an error in
 	// running it — so it goes to stdout with everything else the check has to
@@ -86,6 +97,11 @@ func runConfigCheck(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprint(stdout, "\n問題が1件あります。\n")
 		return exitFailure
 	}
+
+	// What applies everywhere, said once. A repository's own rules are added to
+	// these and can never take one away, so this line is the floor.
+	defaults := len(cfg.DefaultRules())
+	fmt.Fprintf(stdout, "  既定の規則 %d件（すべてのリポジトリに効きます）\n\n", defaults)
 
 	names := cfg.Names()
 	if len(names) == 0 {
@@ -105,6 +121,17 @@ func runConfigCheck(args []string, stdout, stderr io.Writer) int {
 	for _, name := range names {
 		repo := cfg.Repos[name]
 		fmt.Fprintf(w, "  %s\t%s\n", name, repo.Path)
+		// RulesFor cannot fail on a name that came out of Names(), so the
+		// error here is unreachable — reported rather than dropped, since a
+		// check that swallowed one would be checking nothing.
+		rules, err := cfg.RulesFor(name)
+		if err != nil {
+			fmt.Fprintf(w, "  \t✗ %v\n", err)
+			problems++
+		} else {
+			fmt.Fprintf(w, "  \t規則 %d件（既定 %d + このリポジトリ %d）\n",
+				len(rules), defaults, len(repo.Rules))
+		}
 		if err := gitrepo.CheckPath(repo.Path); err != nil {
 			fmt.Fprintf(w, "  \t✗ %v\n", err)
 			problems++

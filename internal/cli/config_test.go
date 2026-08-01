@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/ShiroDoromoto/weir/internal/config"
 )
 
 // newTestRepo makes a repository with one commit, and answers with the path git
@@ -125,6 +127,64 @@ func TestConfigCheckPassesAnEmptyConfiguration(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "[repos.<名前>]") {
 		t.Errorf("stdout = %q, want it to show what to write", stdout.String())
+	}
+}
+
+// The point of reading rules from the configuration is that you can tell what
+// weir will be matched against. The check has to say it: which files it read,
+// and how many rules came out of them for each repository.
+func TestConfigCheckCountsTheRulesThatApply(t *testing.T) {
+	repo := newTestRepo(t)
+	withStore(t, `
+[[rules]]
+type = "pattern"
+value = "AKIA[0-9A-Z]{16}"
+action = "block"
+
+[repos.weir]
+path = "`+repo+`"
+
+[[repos.weir.rules]]
+type = "path"
+value = "secrets/*"
+action = "warn"
+`, "山田太郎\nacme-corp\n")
+
+	var stdout, stderr bytes.Buffer
+	if code := Run([]string{"config", "check"}, &stdout, &stderr); code != exitOK {
+		t.Fatalf("exit code = %d, want %d (stdout: %s, stderr: %s)", code, exitOK, stdout.String(), stderr.String())
+	}
+	out := stdout.String()
+	for _, want := range []string{
+		"denylist",
+		"既定の規則 3件",
+		"規則 4件（既定 3 + このリポジトリ 1）",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("stdout = %q, want it to contain %q", out, want)
+		}
+	}
+}
+
+// Fail-closed, and said out loud: without the word list weir does not run, so
+// the check has to name it rather than pass a configuration that will not work.
+func TestConfigCheckReportsAMissingDenylist(t *testing.T) {
+	repo := newTestRepo(t)
+	withConfig(t, "[repos.weir]\npath = \""+repo+"\"\n")
+	denyPath, err := config.DenylistPath()
+	if err != nil {
+		t.Fatalf("DenylistPath() = %v, want no error", err)
+	}
+	if err := os.Remove(denyPath); err != nil {
+		t.Fatalf("could not remove %s: %v", denyPath, err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := Run([]string{"config", "check"}, &stdout, &stderr); code != exitFailure {
+		t.Fatalf("exit code = %d, want %d (stdout: %s)", code, exitFailure, stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "拒否する語の一覧がありません") {
+		t.Errorf("stdout = %q, want it to say the word list is not there", stdout.String())
 	}
 }
 

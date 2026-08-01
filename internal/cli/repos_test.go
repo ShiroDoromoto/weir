@@ -11,8 +11,16 @@ import (
 )
 
 // withConfig points HOME at a fresh temporary directory holding body as
-// ~/.weir/config.toml. Pass an empty body to leave the file out entirely.
+// ~/.weir/config.toml, and a denylist with no words in it beside it — what
+// `weir init` lays down. Pass an empty body to leave both files out entirely.
 func withConfig(t *testing.T, body string) {
+	t.Helper()
+	withStore(t, body, "# 語はまだ1つもない\n")
+}
+
+// withStore is withConfig with the words written out too, for a test that turns
+// on what is in them.
+func withStore(t *testing.T, body, words string) {
 	t.Helper()
 
 	home := t.TempDir()
@@ -25,9 +33,13 @@ func withConfig(t *testing.T, body string) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatalf("could not make %s: %v", dir, err)
 	}
-	path := filepath.Join(dir, config.FileName)
-	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
-		t.Fatalf("could not write %s: %v", path, err)
+	for _, f := range []struct{ path, body string }{
+		{filepath.Join(dir, config.FileName), body},
+		{filepath.Join(dir, config.DenylistName), words},
+	} {
+		if err := os.WriteFile(f.path, []byte(f.body), 0o644); err != nil {
+			t.Fatalf("could not write %s: %v", f.path, err)
+		}
 	}
 }
 

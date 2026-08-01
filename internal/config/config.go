@@ -1,5 +1,6 @@
-// Package config reads ~/.weir/config.toml — the one place weir's settings
-// live — and resolves a repository by the name written there.
+// Package config reads ~/.weir/config.toml and ~/.weir/denylist — the one place
+// weir's settings live — resolves a repository by the name written there, and
+// says which rules apply to it.
 //
 // Two properties this package is built to keep:
 //
@@ -23,8 +24,10 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/BurntSushi/toml"
+	"github.com/ShiroDoromoto/weir/internal/rule"
 )
 
 // Where the configuration lives. Not overridable: one path, so what weir read
@@ -45,17 +48,48 @@ const (
 // fix).
 var ErrNotFound = errors.New("設定ファイルがありません")
 
+// RuleSpec is one rule as it is written in config.toml — an entry under
+// [[rules]], or one under [[repos.<name>.rules]]. It is the raw shape and
+// nothing else; normalize is what turns a checked one into a rule.Rule.
+//
+// Every field is required. weir does not fill one in: a rule whose action was
+// supplied by the binary is a rule you cannot read off the configuration.
+type RuleSpec struct {
+	// Type is the rule's kind — `pattern` or `path`. Words are not written
+	// here; they go in ~/.weir/denylist, one per line.
+	Type string `toml:"type"`
+	// Value is the regular expression or the glob.
+	Value string `toml:"value"`
+	// Action is `block` (refuse) or `warn` (show it and carry on).
+	Action string `toml:"action"`
+}
+
 // Repo is one [repos.<name>] table.
 type Repo struct {
 	// Name is the table's key — the name a command names this repository by.
 	Name string `toml:"-"`
 	// Path is the repository's absolute path.
 	Path string `toml:"path"`
+	// Rules are this repository's own rules, as written under
+	// [[repos.<name>.rules]]. They are added to the defaults; there is no way
+	// to switch a default off from here.
+	Rules []RuleSpec `toml:"rules"`
+
+	// rules is Rules once it has been checked. Filled at load, so a rule weir
+	// cannot act on stops the whole configuration rather than one commit.
+	rules []rule.Rule
 }
 
 // Config is what ~/.weir/config.toml holds.
 type Config struct {
+	// Rules are the rules that apply to every repository, as written under
+	// [[rules]].
+	Rules []RuleSpec      `toml:"rules"`
 	Repos map[string]Repo `toml:"repos"`
+
+	// defaults is what applies everywhere, checked at load: the words from
+	// ~/.weir/denylist, then Rules.
+	defaults []rule.Rule
 }
 
 // Dir returns ~/.weir.
@@ -78,11 +112,18 @@ func Path() (string, error) {
 
 // DenylistPath returns ~/.weir/denylist.
 func DenylistPath() (string, error) {
-	dir, err := Dir()
+	path, err := Path()
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(dir, DenylistName), nil
+	return denylistPathFor(path), nil
+}
+
+// denylistPathFor is where the words live for a given configuration file:
+// beside it. One rule for both, so what LoadFile read and what a command tells
+// the human it read cannot drift apart.
+func denylistPathFor(configPath string) string {
+	return filepath.Join(filepath.Dir(configPath), DenylistName)
 }
 
 // Load reads ~/.weir/config.toml.
@@ -131,9 +172,20 @@ func LoadFile(path string) (*Config, error) {
 	return &cfg, nil
 }
 
-// normalize fills in each repository's name and rejects a table weir could not
-// act on.
+// normalize fills in each repository's name, reads the words that go with this
+// configuration, and rejects anything weir could not act on.
 func (c *Config) normalize(path string) error {
+	denyPath := denylistPathFor(path)
+	words, err := loadDenylist(denyPath)
+	if err != nil {
+		return err
+	}
+	defaults, err := rulesFrom(c.Rules, path+" の [[rules]]", denyPath)
+	if err != nil {
+		return err
+	}
+	c.defaults = append(words, defaults...)
+
 	for name, repo := range c.Repos {
 		if strings.TrimSpace(name) == "" {
 			return fmt.Errorf(
@@ -150,10 +202,134 @@ func (c *Config) normalize(path string) error {
 				"%s: リポジトリ %q の path が絶対パスではありません: %s (`~` も環境変数も展開しません。`path = \"/絶対/パス\"` の形で書いてください)",
 				path, name, repo.Path)
 		}
+
+		repo.rules, err = rulesFrom(repo.Rules, fmt.Sprintf("%s の [[repos.%s.rules]]", path, name), denyPath)
+		if err != nil {
+			return err
+		}
 		repo.Name = name
 		c.Repos[name] = repo
 	}
 	return nil
+}
+
+// rulesFrom checks one table of rules and turns it into rules weir can act on.
+// where names that table for the reader, and each entry is numbered from 1 —
+// TOML gives an array entry no other name to be called by.
+func rulesFrom(specs []RuleSpec, where, denyPath string) ([]rule.Rule, error) {
+	rules := make([]rule.Rule, 0, len(specs))
+	for i, spec := range specs {
+		at := fmt.Sprintf("%s の%d番目", where, i+1)
+
+		var kind rule.Kind
+		switch spec.Type {
+		case string(rule.Pattern), string(rule.Path):
+			kind = rule.Kind(spec.Type)
+		case "":
+			return nil, fmt.Errorf(
+				"%s: type がありません (`type = \"pattern\"`（正規表現）か `type = \"path\"`（変更されたパス）を書いてください)",
+				at)
+		case string(rule.Literal):
+			// Keeping the words in one file of their own is the point: showing
+			// someone the configuration should not mean showing them the list
+			// of names.
+			return nil, fmt.Errorf(
+				"%s: 語は設定ファイルには書けません (拒否する語は %s に1行1語で書いてください)",
+				at, denyPath)
+		default:
+			return nil, fmt.Errorf(
+				"%s: type が知らない値です: %q (`pattern` か `path` を書いてください。語は %s に書きます)",
+				at, spec.Type, denyPath)
+		}
+
+		var action rule.Action
+		switch spec.Action {
+		case string(rule.Block), string(rule.Warn):
+			action = rule.Action(spec.Action)
+		case "":
+			return nil, fmt.Errorf(
+				"%s: action がありません (`action = \"block\"`（拒否する）か `action = \"warn\"`（拒否しない）を書いてください)",
+				at)
+		default:
+			return nil, fmt.Errorf(
+				"%s: action が知らない値です: %q (`block` か `warn` を書いてください)",
+				at, spec.Action)
+		}
+
+		r := rule.Rule{Kind: kind, Action: action, Value: spec.Value, Source: at}
+		if err := r.Check(); err != nil {
+			return nil, fmt.Errorf("%s: %w", at, err)
+		}
+		rules = append(rules, r)
+	}
+	return rules, nil
+}
+
+// loadDenylist reads the words to refuse, one per line. A blank line, and a
+// line starting with #, is not a word.
+//
+// Every failure is an error, the missing file included. A gate that read an
+// absent or unreadable word list as "no words" would stop refusing on exactly
+// the day the file went missing — silently, and at the moment it mattered.
+//
+// The words carry `block`: this file is the list of what to refuse, and it has
+// no column to say otherwise. `warn` exists for rules that work by inference
+// and will misfire; a name written out in full is not one of those.
+func loadDenylist(path string) ([]rule.Rule, error) {
+	src, err := os.ReadFile(path)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, fmt.Errorf(
+				"拒否する語の一覧がありません: %s (`weir init` で雛形を作れます。既にある設定ファイルには触りません)",
+				path)
+		}
+		return nil, fmt.Errorf(
+			"拒否する語の一覧が読めません: %s: %w (1行1語のテキストファイルとして、読める形で置いてください)",
+			path, err)
+	}
+	if !utf8.Valid(src) {
+		return nil, fmt.Errorf(
+			"%s: UTF-8 として読めません (1行1語、UTF-8 で書いてください)", path)
+	}
+
+	var rules []rule.Rule
+	for i, line := range strings.Split(string(src), "\n") {
+		word := strings.TrimSpace(line)
+		if word == "" || strings.HasPrefix(word, "#") {
+			continue
+		}
+		rules = append(rules, rule.Rule{
+			Kind:   rule.Literal,
+			Action: rule.Block,
+			Value:  word,
+			Source: fmt.Sprintf("%s:%d", path, i+1),
+		})
+	}
+	return rules, nil
+}
+
+// DefaultRules returns the rules that apply to every repository — the words
+// from ~/.weir/denylist, then what is written under [[rules]].
+func (c *Config) DefaultRules() []rule.Rule {
+	return append([]rule.Rule(nil), c.defaults...)
+}
+
+// RulesFor returns the rules that apply to the named repository: everything
+// that applies everywhere, then that repository's own.
+//
+// A repository's rules are added to the defaults and can never switch one off.
+// That is what makes the defaults worth reading: they answer "what applies at
+// minimum, everywhere" on their own, without going through every repository's
+// table first.
+func (c *Config) RulesFor(name string) ([]rule.Rule, error) {
+	repo, err := c.Repo(name)
+	if err != nil {
+		return nil, err
+	}
+	rules := make([]rule.Rule, 0, len(c.defaults)+len(repo.rules))
+	rules = append(rules, c.defaults...)
+	rules = append(rules, repo.rules...)
+	return rules, nil
 }
 
 // Names returns the registered repository names, sorted.
