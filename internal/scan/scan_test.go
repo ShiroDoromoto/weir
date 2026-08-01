@@ -1,6 +1,7 @@
 package scan
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -273,6 +274,188 @@ func TestCommitFailsOutsideARepository(t *testing.T) {
 	_, err := Commit(t.TempDir(), "message", false)
 	if err == nil {
 		t.Fatal("Commit() = nil, want an error")
+	}
+	if !strings.Contains(err.Error(), "git") {
+		t.Errorf("error = %q, want it to name what failed", err)
+	}
+}
+
+// newTracking makes a repository whose main branch is pushed and tracking, so
+// there is an upstream to measure a push against.
+func newTracking(t *testing.T) string {
+	t.Helper()
+
+	dir := newRepo(t)
+	remote := filepath.Join(t.TempDir(), "origin.git")
+	gitIn(t, dir, "init", "--bare", remote)
+	gitIn(t, dir, "remote", "add", "origin", remote)
+	gitIn(t, dir, "push", "-u", "origin", "main")
+	return dir
+}
+
+// commitFile writes a file and commits it, in one step.
+func commitFile(t *testing.T, dir, name, body, message string) {
+	t.Helper()
+
+	write(t, dir, name, body)
+	gitIn(t, dir, "add", name)
+	gitIn(t, dir, "commit", "-m", message)
+}
+
+// wheres is every Where in the surface, joined — for asking what a refusal
+// would be able to point at.
+func wheres(s Surface) string {
+	var b strings.Builder
+	for _, t := range s.Texts {
+		b.WriteString(t.Where)
+		b.WriteString("\n")
+	}
+	return b.String()
+}
+
+// What is already upstream is not being sent. Judging it would refuse a push
+// over something that left long ago, which is a refusal nobody can act on.
+func TestPushSeesOnlyWhatIsNotYetUpstream(t *testing.T) {
+	dir := newTracking(t)
+	commitFile(t, dir, "sent.txt", "ALREADYSENT\n", "先に送ったもの")
+	gitIn(t, dir, "push")
+	commitFile(t, dir, "waiting.txt", "AKIAIOSFODNN7EXAMPLE\n", "まだ送っていないもの")
+
+	s, err := Push(dir)
+	if err != nil {
+		t.Fatalf("Push() = %v, want no error", err)
+	}
+	if strings.Contains(bodies(s), "ALREADYSENT") {
+		t.Errorf("surface = %q, want nothing that is already upstream", bodies(s))
+	}
+	if !strings.Contains(bodies(s), "AKIAIOSFODNN7EXAMPLE") {
+		t.Errorf("surface = %q, want the line the push would send", bodies(s))
+	}
+	if len(s.Paths) != 1 || s.Paths[0] != "waiting.txt" {
+		t.Errorf("Paths = %v, want only the path the push would send", s.Paths)
+	}
+}
+
+// A push sends commits, not a net result. A name added in one commit and taken
+// out in the next still arrives on the remote, in the history, forever — so it
+// is still what the push is judged on.
+func TestPushSeesACommitALaterOneUndoes(t *testing.T) {
+	dir := newTracking(t)
+	commitFile(t, dir, "a.txt", "one\n山田太郎\n", "名前が入ってしまった")
+	commitFile(t, dir, "a.txt", "one\n", "名前を消した")
+
+	s, err := Push(dir)
+	if err != nil {
+		t.Fatalf("Push() = %v, want no error", err)
+	}
+	if !strings.Contains(bodies(s), "山田太郎") {
+		t.Errorf("surface = %q, want the line the first commit adds — the push carries it", bodies(s))
+	}
+}
+
+// Every commit's message goes too, named by the commit it belongs to: a refusal
+// has to say which of them to fix.
+func TestPushSeesEveryMessage(t *testing.T) {
+	dir := newTracking(t)
+	commitFile(t, dir, "a.txt", "one\ntwo\n", "一つ目")
+	commitFile(t, dir, "a.txt", "one\ntwo\nthree\n", "二つ目")
+
+	s, err := Push(dir)
+	if err != nil {
+		t.Fatalf("Push() = %v, want no error", err)
+	}
+	for _, want := range []string{"一つ目", "二つ目"} {
+		if !strings.Contains(bodies(s), want) {
+			t.Errorf("surface = %q, want the message %q", bodies(s), want)
+		}
+	}
+
+	short := strings.TrimSpace(gitIn(t, dir, "rev-parse", "--short", "HEAD"))
+	if !strings.Contains(wheres(s), "コミット "+short+" のメッセージ") {
+		t.Errorf("Wheres = %q, want each commit named by its own", wheres(s))
+	}
+	if !strings.Contains(wheres(s), "コミット "+short+" の a.txt") {
+		t.Errorf("Wheres = %q, want added lines named by commit and file", wheres(s))
+	}
+}
+
+// A merge commit brings its message and nothing else. What it merges in is
+// already in this range as commits of its own, and its first-parent diff would
+// also drag in work that is long since upstream.
+func TestPushDoesNotJudgeAMergeTwice(t *testing.T) {
+	dir := newTracking(t)
+	gitIn(t, dir, "checkout", "-b", "side")
+	commitFile(t, dir, "side.txt", "SIDESECRET\n", "枝で足した")
+	gitIn(t, dir, "checkout", "main")
+	commitFile(t, dir, "main.txt", "MAINLINE\n", "幹で足した")
+	gitIn(t, dir, "merge", "--no-ff", "-m", "枝を取り込んだ", "side")
+
+	s, err := Push(dir)
+	if err != nil {
+		t.Fatalf("Push() = %v, want no error", err)
+	}
+	if got := strings.Count(bodies(s), "SIDESECRET"); got != 1 {
+		t.Errorf("SIDESECRET appears %d times, want 1 — the commit itself, not the merge as well", got)
+	}
+	if !strings.Contains(bodies(s), "枝を取り込んだ") {
+		t.Errorf("surface = %q, want the merge commit's message", bodies(s))
+	}
+	if len(s.Paths) != 2 {
+		t.Errorf("Paths = %v, want the two files the commits change", s.Paths)
+	}
+}
+
+// One file changed by several of these commits is one path. A path rule is
+// about where a change lands, and it lands in one place however many commits
+// carried it there.
+func TestPushNamesAPathOnceAcrossCommits(t *testing.T) {
+	dir := newTracking(t)
+	commitFile(t, dir, "a.txt", "one\ntwo\n", "一つ目")
+	commitFile(t, dir, "a.txt", "one\ntwo\nthree\n", "二つ目")
+
+	s, err := Push(dir)
+	if err != nil {
+		t.Fatalf("Push() = %v, want no error", err)
+	}
+	if len(s.Paths) != 1 || s.Paths[0] != "a.txt" {
+		t.Errorf("Paths = %v, want a.txt once", s.Paths)
+	}
+}
+
+// Nothing to send is a surface with nothing in it, and that is the truth: git
+// will say everything is up to date.
+func TestPushWithNothingToSendIsEmpty(t *testing.T) {
+	dir := newTracking(t)
+
+	s, err := Push(dir)
+	if err != nil {
+		t.Fatalf("Push() = %v, want no error", err)
+	}
+	if len(s.Texts) != 0 || len(s.Paths) != 0 {
+		t.Errorf("surface = %+v, want nothing — there is nothing to send", s)
+	}
+}
+
+// With no upstream weir cannot tell what would be sent. That is not the same as
+// finding nothing, and it must not be answered with an empty surface.
+func TestPushWithoutAnUpstreamSaysSo(t *testing.T) {
+	dir := newRepo(t)
+
+	_, err := Push(dir)
+	if !errors.Is(err, ErrNoUpstream) {
+		t.Fatalf("Push() = %v, want ErrNoUpstream", err)
+	}
+}
+
+// Outside a repository the answer is about the repository, not about a branch
+// that is not tracking anything.
+func TestPushFailsOutsideARepository(t *testing.T) {
+	_, err := Push(t.TempDir())
+	if err == nil {
+		t.Fatal("Push() = nil, want an error")
+	}
+	if errors.Is(err, ErrNoUpstream) {
+		t.Errorf("error = %v, want it to be about the repository, not the upstream", err)
 	}
 	if !strings.Contains(err.Error(), "git") {
 		t.Errorf("error = %q, want it to name what failed", err)
