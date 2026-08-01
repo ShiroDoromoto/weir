@@ -2,10 +2,12 @@ module github.com/ShiroDoromoto/weir
 
 go 1.26
 
-require github.com/BurntSushi/toml v1.6.0
+require (
+	github.com/BurntSushi/toml v1.6.0
+	github.com/bmatcuk/doublestar/v4 v4.10.0
+)
 
 require (
-	github.com/bmatcuk/doublestar/v4 v4.10.0 // indirect
 	github.com/clipperhouse/uax29/v2 v2.7.0 // indirect
 	github.com/fatih/color v1.19.0 // indirect
 	github.com/mattn/go-colorable v0.1.14 // indirect
