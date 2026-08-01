@@ -25,6 +25,14 @@ func Commit(dir, message string, all bool, stdout, stderr io.Writer) error {
 	return run(dir, args, stdout, stderr)
 }
 
+// Push sends the repository at dir to where plain git would send it. Neither a
+// remote nor a branch is passed: git's own default — the current branch's
+// upstream — is the destination, so weir and plain git cannot disagree about
+// where a push landed.
+func Push(dir string, stdout, stderr io.Writer) error {
+	return run(dir, []string{"push"}, stdout, stderr)
+}
+
 // run runs git in dir and reports whether it succeeded.
 func run(dir string, args []string, stdout, stderr io.Writer) error {
 	cmd := exec.Command("git", args...)
