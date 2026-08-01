@@ -4,3 +4,7 @@ CLAUDE.md
 
 # make build の出力
 /bin/
+
+# wharfy が焼いた配る物と、その記録。どちらも実行のたびに作り直される
+/dist/
+/.wharfy/

@@ -1,0 +1,39 @@
+# wharfy.yaml — weir の配布設定。
+# project / github / homepage は git remote と規約から推測されるので書かない。
+
+description: 設定に書かれた規則だけで、コミットと push を止める門
+
+# 押さえている口だけを並べる（列挙は既定の置き換えになるので、要る口は全部書く）。
+#   releases  … 生のバイナリと各種資産の置き場。他の口はここを読む
+#   script    … curl|sh。tap を足さずに入れられる道
+#   goinstall … Go を持っている人向け。梱包は無い
+#   homebrew  … このタスクの目的。ShiroDoromoto/homebrew-weir へ formula を書く
+#
+# scoop は入れていない。weir は「エージェントの git を止める門」で、置き場は macOS / Linux の
+# 開発機。bucket リポジトリを1つ増やすのは、Windows で実際に使う人が出てからでよい。
+# apt / rpm も同じ理由に加えて、署名済みリポジトリを他所に預ける話になるので入れない。
+channels:
+  - releases
+  - script
+  - goinstall
+  - homebrew
+
+# weir は git を「プログラムとして」呼ぶ（internal/gitcmd）。git が無ければ commit も push も
+# できないので、任意ではなく必須の実行時依存として宣言する。formula の depends_on になる。
+runtime_deps:
+  - {name: git}
+
+build:
+  goos: [linux, darwin]
+  goarch: [amd64, arm64]
+  # wharfy が既定で注入するのは main.version で、weir の版は internal/version.Version にある。
+  # 書かないと、配った実物が `weir dev` と名乗る（焼いて確かめたときに、実際にそうなった）。
+  # 行き先は Makefile の build ターゲットと同じ。手元と CI で別の物を焼かない。
+  ldflags_extra:
+    - -X github.com/ShiroDoromoto/weir/internal/version.Version={{.Version}}
+
+# 起動確認の既定は `--version` → `version` → `--help` の順で試す。weir は `--version` を
+# 知らないコマンドとして終了コード 2 で拒否する（門は、知らない打ち方を黙って通さない）ので、
+# 通る打ち方を名指ししておく。
+verify:
+  run: [version]

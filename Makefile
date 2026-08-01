@@ -5,11 +5,11 @@ GO      ?= go
 VERSION ?= dev
 LDFLAGS := -X github.com/ShiroDoromoto/weir/internal/version.Version=$(VERSION)
 
-.PHONY: all check fmt vet test build clean
+.PHONY: all check fmt vet test actions build clean
 
 all: check
 
-check: fmt vet test
+check: fmt vet test actions
 
 fmt:
 	@files="$$(gofmt -l .)"; \
@@ -24,6 +24,12 @@ vet:
 
 test:
 	$(GO) test ./...
+
+# ワークフローの壊れは、目で見ても出てこない。走らせて初めて分かる物を、走らせる前に見る。
+# actionlint は go.mod の tool として固定してあるので、入れ忘れた誰かの手元だけ検査が
+# 素通りする、ということが起きない。
+actions:
+	$(GO) tool actionlint -color
 
 build:
 	$(GO) build -ldflags "$(LDFLAGS)" -o bin/weir ./cmd/weir

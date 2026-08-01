@@ -1,0 +1,21 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      # 検査の中身は Makefile が持つ。ここで並びを組み直さない——手元と CI で違う物を回すと、
+      # どちらかが緑でも何も保証しなくなる。手元で `make check` が緑なら、ここも緑になる。
+      - name: make check
+        run: make check
