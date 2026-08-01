@@ -105,11 +105,12 @@ func Commit(dir, message string, all bool) (Surface, error) {
 // refs on its way. Being behind only ever adds commits to the surface — it
 // cannot drop one — so the drift falls on the refusing side.
 //
-// A merge commit contributes its message and nothing else. Its first-parent
-// diff is mostly work that is already on the remote, and judging a push on that
-// would refuse it over changes that left long ago; what the merge brings in
-// that is genuinely new is in the commits themselves, which are in this set
-// too.
+// A merge commit is read differently: only the lines that are in none of its
+// parents. Its first-parent diff is mostly work that is already on the remote,
+// and judging a push on that would refuse it over changes that left long ago —
+// what the merge brings in that is genuinely new arrives as commits of its own,
+// which are in this set too. What is left over, and in no commit anywhere, is
+// what someone typed while resolving a conflict.
 func Push(dir string) (Surface, error) {
 	remote, err := destinationOf(dir)
 	if err != nil {
@@ -126,10 +127,12 @@ func Push(dir string) (Surface, error) {
 	var s Surface
 	for _, c := range commits {
 		s.Texts = append(s.Texts, Text{Where: "コミット " + c.short + " のメッセージ", Body: c.message})
-		if c.merge {
-			continue
+
+		read := changes
+		if c.parents > 1 {
+			read = resolutions
 		}
-		texts, paths, err := changes(dir, c.sha)
+		texts, paths, err := read(dir, c.sha)
 		if err != nil {
 			return Surface{}, err
 		}
@@ -186,9 +189,13 @@ func destinationOf(dir string) (string, error) {
 
 // commit is one commit a push would send.
 type commit struct {
-	sha     string
-	short   string
-	merge   bool
+	sha   string
+	short string
+	// parents is how many parents it has: none for a root commit, one for an
+	// ordinary one, two or more for a merge. It is a count rather than a flag
+	// because a combined diff writes one column per parent, and reading one
+	// means knowing how many there are.
+	parents int
 	message string
 }
 
@@ -220,7 +227,7 @@ func commitsIn(dir string, selection ...string) ([]commit, error) {
 			sha:   fields[0],
 			short: fields[1],
 			// Everything after the commit and its abbreviation is its parents.
-			merge:   len(fields) > 3,
+			parents: len(fields) - 2,
 			message: strings.TrimRight(message, "\n"),
 		})
 	}
@@ -233,9 +240,32 @@ func changes(dir, sha string) ([]Text, []string, error) {
 	// diff-tree rather than show: it answers with the diff and nothing else,
 	// so no header has to be trimmed back off. --root is what makes a commit
 	// with no parent answer at all, instead of answering with nothing.
-	base := []string{"diff-tree", "--root", "--no-commit-id", "-r", sha}
+	return diffTree(dir, []string{"diff-tree", "--root", "--no-commit-id", "-r", sha})
+}
 
-	out, err := git(dir, "送られるコミット", append([]string{}, append(base, "--name-only", "-z")...))
+// resolutions reads what a merge commit holds that none of its parents do —
+// the lines someone typed while resolving a conflict, and the files they are
+// in.
+//
+// --cc is what asks that question: it drops any file whose result matches a
+// parent, and inside the ones left it shows only the hunks that differ from
+// every parent. A merge that went through cleanly answers with nothing at all,
+// so this adds no surface where there was no hand in it.
+//
+// The alternative — the first-parent diff — would drag in everything the merge
+// took from the other side, all of it already judged as the commits it came
+// from, and much of it already on the remote.
+func resolutions(dir, sha string) ([]Text, []string, error) {
+	return diffTree(dir, []string{"diff-tree", "--cc", "--no-commit-id", "-r", sha})
+}
+
+// diffTree runs one diff-tree two ways — for the paths, and for the body — and
+// answers with the lines it adds and the paths it touches.
+//
+// The paths are asked for separately, NUL-separated, rather than read out of
+// the diff's own headers: that answer is exact whatever a path is spelled with.
+func diffTree(dir string, base []string) ([]Text, []string, error) {
+	out, err := git(dir, "送られるコミット", append(append([]string{}, base...), "--name-only", "-z"))
 	if err != nil {
 		return nil, nil, err
 	}
@@ -246,7 +276,7 @@ func changes(dir, sha string) ([]Text, []string, error) {
 		}
 	}
 
-	body, err := git(dir, "送られるコミット", append([]string{}, append(base, "-p", "-U0")...))
+	body, err := git(dir, "送られるコミット", append(append([]string{}, base...), "-p", "-U0"))
 	if err != nil {
 		return nil, nil, err
 	}
@@ -282,16 +312,27 @@ func diff(dir string, selector []string) ([]Text, []string, error) {
 // addedLines pulls the added lines out of a diff, grouped by the file they are
 // being added to.
 //
-// The `+++ b/…` header and an added line beginning with `++` are told apart by
+// It reads an ordinary diff and a merge's combined diff with one pass, because
+// the diff says which it is: a hunk opens with one more `@` than the commit has
+// parents — `@@` for an ordinary one, `@@@` for a two-parent merge — and that
+// same count is how many columns each line inside carries, one per parent. A
+// column holds `+` when the line is not in that parent, so a line whose columns
+// are all `+` is in none of them. Those are the ones taken: in an ordinary diff
+// that is every added line, and in a merge it is only what was typed by hand.
+//
+// The `+++ b/…` header and an added line beginning with `+++` are told apart by
 // where they are: a header only ever comes before the first `@@` of a file, and
-// every line inside a hunk carries a `+` or `-` in front of it. Matching on the
-// text alone would read `++x` as a filename.
+// every line inside a hunk carries its columns in front of it. Matching on the
+// text alone would read `+++x` as a filename.
 func addedLines(body string) []Text {
 	var (
-		texts  []Text
-		where  string
-		inHunk bool
-		b      strings.Builder
+		texts []Text
+		where string
+		// columns is how wide a line's prefix is inside the hunk being read,
+		// and zero when no hunk is open — the two things a line has to be
+		// judged against, and one answers both.
+		columns int
+		b       strings.Builder
 	)
 	flush := func() {
 		if b.Len() > 0 {
@@ -302,15 +343,18 @@ func addedLines(body string) []Text {
 
 	for _, line := range strings.Split(body, "\n") {
 		switch {
-		case strings.HasPrefix(line, "diff --git "):
+		case strings.HasPrefix(line, "diff --"):
+			// `diff --git` opens an ordinary file, `diff --cc` a combined one.
+			// Nothing inside a hunk can look like either: every line in one
+			// starts with its columns.
 			flush()
-			where, inHunk = "", false
+			where, columns = "", 0
 		case strings.HasPrefix(line, "@@"):
-			inHunk = true
-		case inHunk && strings.HasPrefix(line, "+"):
-			b.WriteString(line[len("+"):])
+			columns = len(line) - len(strings.TrimLeft(line, "@")) - 1
+		case columns > 0 && addedInEveryParent(line, columns):
+			b.WriteString(line[columns:])
 			b.WriteString("\n")
-		case !inHunk && strings.HasPrefix(line, "+++ "):
+		case columns == 0 && strings.HasPrefix(line, "+++ "):
 			// b/ is git's own prefix, not part of the path. A deleted file
 			// says /dev/null here and adds no lines, so it never surfaces.
 			where = strings.TrimPrefix(strings.TrimPrefix(line, "+++ "), "b/")
@@ -318,6 +362,21 @@ func addedLines(body string) []Text {
 	}
 	flush()
 	return texts
+}
+
+// addedInEveryParent reports whether every one of a diff line's columns says
+// the line is new — which for an ordinary diff, having one column, is simply
+// that it is an added line.
+func addedInEveryParent(line string, columns int) bool {
+	if len(line) < columns {
+		return false
+	}
+	for i := 0; i < columns; i++ {
+		if line[i] != '+' {
+			return false
+		}
+	}
+	return true
 }
 
 // appendNew adds the paths that are not in have already, keeping the order they
