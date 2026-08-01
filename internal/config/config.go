@@ -175,6 +175,6 @@ func (e *UnknownRepoError) Error() string {
 			e.Name, e.Name)
 	}
 	return fmt.Sprintf(
-		"リポジトリ %q は登録されていません。登録されているのは: %s (`weir --repo <名前>` の名前は、この一覧の中から選んでください)",
+		"リポジトリ %q は登録されていません。登録されているのは: %s (--repo には、この一覧の名前を指定してください)",
 		e.Name, strings.Join(e.Known, ", "))
 }
