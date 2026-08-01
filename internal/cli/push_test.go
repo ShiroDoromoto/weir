@@ -129,8 +129,11 @@ func TestPushWithoutAConfigurationPointsAtIt(t *testing.T) {
 	}
 }
 
-// git failing is weir failing, not weir passing quietly.
-func TestPushFailsWhenThereIsNowhereToSendIt(t *testing.T) {
+// With no upstream, weir cannot tell which commits a push would send, so it
+// does not run one. Plain git often refuses such a push itself — but with
+// push.autoSetupRemote it sends the branch instead, and weir would have passed
+// commits it never looked at.
+func TestPushRefusesWhenItCannotTellWhatWouldBeSent(t *testing.T) {
 	dir := newRepo(t)
 	cmd := exec.Command("git", "commit", "--message", "一つ目")
 	cmd.Dir = dir
@@ -144,8 +147,12 @@ func TestPushFailsWhenThereIsNowhereToSendIt(t *testing.T) {
 	if code != exitFailure {
 		t.Fatalf("exit code = %d, want %d", code, exitFailure)
 	}
-	if !strings.Contains(stderr.String(), "git push") {
-		t.Errorf("stderr = %q, want it to name what failed", stderr.String())
+	// The three parts every refusal carries: what happened, what to do about
+	// it, and a line that works.
+	for _, want := range []string{"upstream", "--set-upstream-to", pushExample} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Errorf("stderr = %q, want it to carry %q", stderr.String(), want)
+		}
 	}
 }
 

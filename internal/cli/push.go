@@ -9,6 +9,7 @@ import (
 
 	"github.com/ShiroDoromoto/weir/internal/config"
 	"github.com/ShiroDoromoto/weir/internal/gitcmd"
+	"github.com/ShiroDoromoto/weir/internal/scan"
 )
 
 // pushExample is the line every refusal ends with — the one that works.
@@ -66,6 +67,50 @@ func runPush(args []string, stdout, stderr io.Writer) int {
 	if err != nil {
 		return refusePush(stderr, err.Error())
 	}
+
+	matchers, err := rulesFor(cfg, *repoName)
+	if err != nil {
+		fmt.Fprintf(stderr, "weir push: %v\n", err)
+		return exitFailure
+	}
+
+	surface, err := scan.Push(repo.Path)
+	if errors.Is(err, scan.ErrNoUpstream) {
+		// git may well refuse this push itself — but not always, and weir
+		// cannot tell which git will do. What it can tell is that it has not
+		// seen what would be sent, and a gate that passes what it never looked
+		// at is not one.
+		fmt.Fprintf(stderr, "weir push: 何が送られるのかを読み出せないので、プッシュしませんでした。\n\n")
+		fmt.Fprint(stderr, `いまのブランチには upstream がありません。
+weir は「upstream にまだ無いコミット」を送られるものとして見ます。upstream が無いと、
+どこまでが送られるのかが決まらないので、判定できません。
+
+次にすること:
+  1. 送り先のブランチが既にリモートにあるなら、送らずに upstream だけを決める:
+
+  git branch --set-upstream-to=<リモート>/<ブランチ名>
+
+  2. 決めたら、もう一度:
+
+`)
+		fmt.Fprintf(stderr, "  %s\n", pushExample)
+		return exitFailure
+	}
+	if err != nil {
+		fmt.Fprintf(stderr, "weir push: %v\n", err)
+		return exitFailure
+	}
+
+	blocked, warned := judge(matchers, surface)
+	if len(blocked) > 0 {
+		// Editing the file is not enough here: what matched is in a commit
+		// already made, and a push carries the history, not the working tree.
+		return refuseMatched(stderr, "weir push", "プッシュ",
+			"上のコミットから、規則に当たるものを取り除く（履歴に残っているので、"+
+				"打ち直しが要ります: git commit --amend / git rebase -i）",
+			pushExample, blocked)
+	}
+	warn(stdout, "weir push", warned)
 
 	if err := gitcmd.Push(repo.Path, stdout, stderr); err != nil {
 		fmt.Fprintf(stderr, "weir push: %v\n", err)

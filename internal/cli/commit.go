@@ -9,6 +9,7 @@ import (
 
 	"github.com/ShiroDoromoto/weir/internal/config"
 	"github.com/ShiroDoromoto/weir/internal/gitcmd"
+	"github.com/ShiroDoromoto/weir/internal/scan"
 )
 
 // commitExample is the line every refusal ends with — the one that works.
@@ -68,6 +69,29 @@ func runCommit(args []string, stdout, stderr io.Writer) int {
 	if err != nil {
 		return refuseCommit(stderr, err.Error())
 	}
+
+	matchers, err := rulesFor(cfg, *repoName)
+	if err != nil {
+		fmt.Fprintf(stderr, "weir commit: %v\n", err)
+		return exitFailure
+	}
+
+	// What would be committed is read before anything is committed. A gate that
+	// judges after the fact is not a gate.
+	surface, err := scan.Commit(repo.Path, *message, *all)
+	if err != nil {
+		// Nothing was read, so nothing was judged. Committing anyway would be
+		// passing something weir never looked at.
+		fmt.Fprintf(stderr, "weir commit: %v\n", err)
+		return exitFailure
+	}
+
+	blocked, warned := judge(matchers, surface)
+	if len(blocked) > 0 {
+		return refuseMatched(stderr, "weir commit", "コミット",
+			"上の場所から、規則に当たるものを取り除く", commitExample, blocked)
+	}
+	warn(stdout, "weir commit", warned)
 
 	if err := gitcmd.Commit(repo.Path, *message, *all, stdout, stderr); err != nil {
 		fmt.Fprintf(stderr, "weir commit: %v\n", err)
