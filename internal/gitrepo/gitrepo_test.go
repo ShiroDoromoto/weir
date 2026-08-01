@@ -183,3 +183,52 @@ func TestResolveSkipsARegisteredPathThatIsGone(t *testing.T) {
 		t.Errorf("Resolve(%s).Name = %q, want %q", repo, got.Name, "weir")
 	}
 }
+
+func TestLocateTellsTheWorktreeFromTheRepositoryProper(t *testing.T) {
+	repo := newRepo(t)
+	worktree := addWorktree(t, repo)
+	sub := filepath.Join(repo, "nested")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatalf("could not make %s: %v", sub, err)
+	}
+
+	for _, c := range []struct {
+		name     string
+		dir      string
+		want     Where
+		wantTree string
+	}{
+		{"the checkout itself", repo, Proper, repo},
+		{"a directory under it", sub, Proper, repo},
+		{"a worktree cut from it", worktree, Linked, worktree},
+		{"another repository", newRepo(t), Elsewhere, ""},
+		// Where weir is usually run from: no repository in sight, and the
+		// repository named on the command line is the answer anyway.
+		{"no repository at all", t.TempDir(), Elsewhere, ""},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			where, tree, err := Locate(c.dir, repo)
+			if err != nil {
+				t.Fatalf("Locate(%s, %s): %v", c.dir, repo, err)
+			}
+			if where != c.want {
+				t.Errorf("Locate(%s) = %v, want %v", c.dir, where, c.want)
+			}
+			if tree != c.wantTree {
+				t.Errorf("Locate(%s) tree = %q, want %q", c.dir, tree, c.wantTree)
+			}
+		})
+	}
+}
+
+func TestLocateReportsARegisteredPathItCannotResolve(t *testing.T) {
+	repo := newRepo(t)
+	gone := filepath.Join(t.TempDir(), "gone")
+
+	// A registered path that is not there is a configuration to fix, not a
+	// directory that is merely elsewhere — saying "elsewhere" would have weir
+	// carry on and run git in a path nobody can stand in.
+	if _, _, err := Locate(repo, gone); err == nil {
+		t.Fatalf("Locate(%s, %s) = nil error, want the unresolvable path reported", repo, gone)
+	}
+}

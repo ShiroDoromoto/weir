@@ -9,6 +9,10 @@
 // proper, and its parent is that repository. The judgement is then made on the
 // repository proper, for the worktree as much as for the checkout it was cut
 // from.
+//
+// Which working tree a command acts in is a separate question with the same
+// root, and Locate answers it: a directory is in the repository's own checkout,
+// in a worktree cut from it, or nowhere near it.
 package gitrepo
 
 import (
@@ -61,6 +65,76 @@ func Root(dir string) (string, error) {
 		return "", fmt.Errorf("%s: リポジトリの位置を解決できません: %w", dir, err)
 	}
 	return root, nil
+}
+
+// Where says where a directory sits in relation to a registered repository.
+type Where int
+
+const (
+	// Elsewhere is a directory in some other repository, or in none at all.
+	// This is what weir run from anywhere but the repository looks like, and
+	// it is the ordinary case: the repository was named on the command line,
+	// not found by looking around.
+	Elsewhere Where = iota
+	// Proper is a directory inside the repository's own checkout — the one
+	// sitting at the registered path.
+	Proper
+	// Linked is a directory inside a worktree cut from the repository. The
+	// history is the repository's, but the files are not the ones at the
+	// registered path, and neither is the branch.
+	Linked
+)
+
+// Locate answers where dir sits in relation to the repository registered at
+// path, and which working tree that is — empty for Elsewhere.
+//
+// A dir outside any working tree is Elsewhere rather than an error. weir is
+// run from wherever the person happens to be standing, and standing nowhere
+// near the repository is not a problem to report: the repository was named.
+func Locate(dir, path string) (Where, string, error) {
+	registered, err := canonical(path)
+	if err != nil {
+		return Elsewhere, "", fmt.Errorf("登録されたパスを解決できません: %s: %w", path, err)
+	}
+
+	// Which repository first: a dir that is not in a working tree at all, or is
+	// in someone else's, is answered here and git is not asked a second time.
+	root, err := Root(dir)
+	if err != nil || root != registered {
+		return Elsewhere, "", nil
+	}
+
+	// From here dir is known to be in this repository, so a git that cannot say
+	// which of its trees is a question left unanswered, not an Elsewhere.
+	// Reading it as Elsewhere would send weir to the registered path — the one
+	// case this whole function exists to stop.
+	tree, err := topLevel(dir)
+	if err != nil {
+		return Elsewhere, "", err
+	}
+	if tree == registered {
+		return Proper, tree, nil
+	}
+	return Linked, tree, nil
+}
+
+// topLevel answers the root of the working tree dir is in, canonical, so two
+// spellings of one directory compare equal.
+func topLevel(dir string) (string, error) {
+	// Asked apart from Root's rev-parse rather than as a third flag on it:
+	// --show-toplevel has no answer outside a working tree, and folding it in
+	// would turn "not a working tree" into a git failure with a worse message.
+	cmd := exec.Command("git", "rev-parse", "--show-toplevel")
+	cmd.Dir = dir
+	out, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("%s: どの作業ツリーの中かを解決できません: %w", dir, err)
+	}
+	tree, err := canonical(strings.TrimSpace(string(out)))
+	if err != nil {
+		return "", fmt.Errorf("%s: どの作業ツリーの中かを解決できません: %w", dir, err)
+	}
+	return tree, nil
 }
 
 // CheckPath reports what stops path from being usable as a registered

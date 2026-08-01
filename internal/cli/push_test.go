@@ -81,7 +81,7 @@ func TestPushRefusesAndSaysHow(t *testing.T) {
 		{
 			name:      "an option weir does not have",
 			args:      []string{"push", "--repo", "weir", "--force"},
-			wantCause: "--repo だけ",
+			wantCause: "--repo / --here だけ",
 		},
 		{
 			name:      "a destination, which weir does not take",

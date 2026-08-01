@@ -12,18 +12,36 @@ import (
 	"github.com/ShiroDoromoto/weir/internal/scan"
 )
 
-// pushExample is the line every refusal ends with — the one that works.
-const pushExample = `weir push --repo <リポジトリ名>`
+// The line every refusal ends with — the one that works. See commit.go for why
+// there is both a placeholder and a format.
+const (
+	pushFormat     = `weir push --repo %s`
+	pushHereFormat = `weir push --repo %s --here`
+)
+
+var pushExample = fmt.Sprintf(pushFormat, "<リポジトリ名>")
+
+// pushCommand is what workdir says about this command when it refuses.
+var pushCommand = worktreeCommand{
+	name:       "weir push",
+	verb:       "プッシュ",
+	format:     pushFormat,
+	hereFormat: pushHereFormat,
+}
 
 const pushUsage = `weir push — 登録したリポジトリでプッシュする。
 
 使い方:
-  weir push --repo <リポジトリ名>
+  weir push --repo <リポジトリ名> [--here]
 
 オプション:
   --repo <名前>     対象のリポジトリ名（~/.weir/config.toml の [repos.<名前>]）
+  --here            いまいる作業ツリーからプッシュする（worktree で作業しているとき）
 
 送り先は指定しません。素の git と同じく、いまのブランチの upstream に送ります。
+
+--here が無いときにプッシュするのは、設定に書かれたリポジトリ本体です。worktree はブランチが
+別なので、--repo で名指したリポジトリの worktree の中で --here 無しに打つと拒否します。
 `
 
 // runPush pushes in the repository named by --repo. The name is the only way
@@ -34,6 +52,7 @@ func runPush(args []string, stdout, stderr io.Writer) int {
 	// weir says its own refusals, in its own words and with the way through.
 	flags.SetOutput(io.Discard)
 	repoName := flags.String("repo", "", "対象のリポジトリ名")
+	here := flags.Bool("here", false, "いまいる作業ツリーからプッシュする")
 
 	if err := flags.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -41,7 +60,7 @@ func runPush(args []string, stdout, stderr io.Writer) int {
 			return exitOK
 		}
 		return refusePush(stderr, fmt.Sprintf(
-			"オプションを読めません（%v）。weir push が取るのは --repo だけです", err))
+			"オプションを読めません（%v）。weir push が取るのは --repo / --here だけです", err))
 	}
 	if flags.NArg() != 0 {
 		// `git push origin main` is the habit this catches. Saying only "extra
@@ -68,6 +87,14 @@ func runPush(args []string, stdout, stderr io.Writer) int {
 		return refusePush(stderr, err.Error())
 	}
 
+	// Which working tree, before anything is read. A worktree is on its own
+	// branch with its own upstream, so this decides what a push would even
+	// send — not only where git is run.
+	dir, code := workdir(pushCommand, repo, *here, stdout, stderr)
+	if dir == "" {
+		return code
+	}
+
 	matchers, err := rulesFor(cfg, *repoName)
 	if err != nil {
 		fmt.Fprintf(stderr, "weir push: %v\n", err)
@@ -78,7 +105,7 @@ func runPush(args []string, stdout, stderr io.Writer) int {
 		noRules(stdout, "weir push")
 	}
 
-	surface, err := scan.Push(repo.Path)
+	surface, err := scan.Push(dir)
 	if errors.Is(err, scan.ErrNoUpstream) {
 		// git may well refuse this push itself — but not always, and weir
 		// cannot tell which git will do. What it can tell is that it has not
@@ -116,7 +143,7 @@ weir は「upstream にまだ無いコミット」を送られるものとして
 	}
 	warn(stdout, "weir push", warned)
 
-	if err := gitcmd.Push(repo.Path, stdout, stderr); err != nil {
+	if err := gitcmd.Push(dir, stdout, stderr); err != nil {
 		fmt.Fprintf(stderr, "weir push: %v\n", err)
 		return exitFailure
 	}
