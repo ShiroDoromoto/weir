@@ -24,6 +24,7 @@ const usage = `weir — 設定に書かれた規則だけで、コミットと p
 コマンド:
   init       設定の雛形を作る
   commit     登録したリポジトリでコミットする
+  push       登録したリポジトリでプッシュする
   repos      登録されているリポジトリを一覧する
   version    版を表示する
   help       この使い方を表示する
@@ -41,6 +42,8 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		return runInit(args[1:], stdout, stderr)
 	case "commit":
 		return runCommit(args[1:], stdout, stderr)
+	case "push":
+		return runPush(args[1:], stdout, stderr)
 	case "repos":
 		return runRepos(args[1:], stdout, stderr)
 	case "version":
