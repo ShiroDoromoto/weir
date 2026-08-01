@@ -8,10 +8,10 @@
 // refusing one — a refusal nobody can act on, since fixing it would mean
 // changing something the commit does not touch.
 //
-// For a push it is the commits the push would send, and no others: everything
-// between the current branch's upstream and HEAD, each one's message and each
-// one's own changes. A commit made with plain git never went past weir, so the
-// push is where it is seen; a commit already upstream is not being sent, and
+// For a push it is the commits the push would send, and no others: the ones the
+// destination remote does not have yet, each one's message and each one's own
+// changes. A commit made with plain git never went past weir, so the push is
+// where it is seen; a commit the remote already holds is not being sent, and
 // judging one would refuse a push over something that left long ago.
 //
 // Lines the commit removes are left out for the same reason. A commit that
@@ -41,10 +41,10 @@ type Text struct {
 // MessageWhere is what Where says for the commit message.
 const MessageWhere = "コミットメッセージ"
 
-// ErrNoUpstream is what Push answers with when the current branch has no
-// upstream.
+// ErrNoUpstream is what Push answers with when nothing tells it which remote a
+// push would go to — no upstream on the branch, or no branch at all.
 //
-// It is not "nothing to look at": with no upstream weir cannot tell which
+// It is not "nothing to look at": with no destination weir cannot tell which
 // commits a push would send, and an empty surface would read as a clean one.
 // Plain git usually refuses such a push itself, but not always — with
 // push.autoSetupRemote it sends the branch and sets the upstream on the way —
@@ -88,27 +88,38 @@ func Commit(dir, message string, all bool) (Surface, error) {
 	return s, nil
 }
 
-// Push assembles what `weir push` in dir would send: the commits between the
-// current branch's upstream and HEAD, oldest first, each with its message and
-// what it changes.
+// Push assembles what `weir push` in dir would send: the commits that are not
+// on the destination remote yet, oldest first, each with its message and what
+// it changes.
 //
-// The destination is git's own — the current branch's upstream — because that
-// is where a push with no arguments goes, and weir passes none. A branch with
-// no upstream answers ErrNoUpstream: what would be sent is not knowable, and
-// saying so is not the same as finding nothing.
+// Not `<upstream>..HEAD`. That range is "newer than this branch's upstream",
+// which is not the same set: merge main into a topic branch and main's commits
+// — already on the remote, by another ref — fall inside it. A rule matching one
+// of those refuses the push over something that left long ago, and there is
+// nothing the person can do about it. What is not on the remote yet is asked
+// directly instead.
 //
-// A merge commit contributes its message and nothing else. Its first-parent
-// diff is mostly work that is already upstream, and judging a push on that
-// would refuse it over changes that left long ago; what the merge brings in
-// that is genuinely new is in the commits themselves, which are in this range
-// too.
+// The remote-tracking refs it asks against can be behind what the remote
+// actually holds, and weir does not fetch to close that: a gate that reaches
+// for the network judges differently offline than on, and quietly rewrites
+// refs on its way. Being behind only ever adds commits to the surface — it
+// cannot drop one — so the drift falls on the refusing side.
+//
+// A merge commit is read differently: only the lines that are in none of its
+// parents. Its first-parent diff is mostly work that is already on the remote,
+// and judging a push on that would refuse it over changes that left long ago —
+// what the merge brings in that is genuinely new arrives as commits of its own,
+// which are in this set too. What is left over, and in no commit anywhere, is
+// what someone typed while resolving a conflict.
 func Push(dir string) (Surface, error) {
-	upstream, err := upstreamOf(dir)
+	remote, err := destinationOf(dir)
 	if err != nil {
 		return Surface{}, err
 	}
 
-	commits, err := commitsIn(dir, upstream+"..HEAD")
+	// A trailing /* is what --remotes= means by a name with no glob in it.
+	// Writing it out keeps the pattern readable as the pattern it is.
+	commits, err := commitsIn(dir, "HEAD", "--not", "--remotes="+remote+"/*")
 	if err != nil {
 		return Surface{}, err
 	}
@@ -116,10 +127,12 @@ func Push(dir string) (Surface, error) {
 	var s Surface
 	for _, c := range commits {
 		s.Texts = append(s.Texts, Text{Where: "コミット " + c.short + " のメッセージ", Body: c.message})
-		if c.merge {
-			continue
+
+		read := changes
+		if c.parents > 1 {
+			read = resolutions
 		}
-		texts, paths, err := changes(dir, c.sha)
+		texts, paths, err := read(dir, c.sha)
 		if err != nil {
 			return Surface{}, err
 		}
@@ -134,38 +147,66 @@ func Push(dir string) (Surface, error) {
 	return s, nil
 }
 
-// upstreamOf names where a push from dir would go.
-func upstreamOf(dir string) (string, error) {
+// destinationOf names the remote a push from dir would go to.
+//
+// It asks for %(push:remotename) rather than %(upstream:remotename) because
+// those two are not the same remote. With branch.<name>.pushRemote or
+// remote.pushDefault set, a branch fetches from one and pushes to another;
+// subtracting what is on the fetch remote would drop commits the push remote
+// has never seen out of the surface, which is the one direction weir must not
+// fail in.
+func destinationOf(dir string) (string, error) {
 	// Whether this is a repository at all is asked first, so a failure to
-	// answer the upstream question can only be about the upstream — and the
-	// caller outside a repository is told that, rather than being told its
+	// answer the destination question can only be about the destination — and
+	// the caller outside a repository is told that, rather than being told its
 	// branch is not tracking anything.
 	if _, err := git(dir, "送り先", []string{"rev-parse", "--git-dir"}); err != nil {
 		return "", err
 	}
-	out, err := git(dir, "送り先", []string{"rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"})
+	// A detached HEAD is not on a branch, so it has nothing configured to push
+	// to — the same answer as a branch with no upstream, arriving by a
+	// different road.
+	branch, err := git(dir, "送り先", []string{"symbolic-ref", "--quiet", "--short", "HEAD"})
 	if err != nil {
 		return "", ErrNoUpstream
 	}
-	return strings.TrimSpace(out), nil
+	// refs/heads/<branch> matches that branch and nothing else: for-each-ref
+	// only extends a pattern at a slash, and git will not let refs/heads/x and
+	// refs/heads/x/y both exist. So this is one line, or none.
+	out, err := git(dir, "送り先", []string{
+		"for-each-ref", "--format=%(push:remotename)",
+		"refs/heads/" + strings.TrimSpace(branch),
+	})
+	if err != nil {
+		return "", err
+	}
+	remote := strings.TrimSpace(out)
+	if remote == "" {
+		return "", ErrNoUpstream
+	}
+	return remote, nil
 }
 
 // commit is one commit a push would send.
 type commit struct {
-	sha     string
-	short   string
-	merge   bool
+	sha   string
+	short string
+	// parents is how many parents it has: none for a root commit, one for an
+	// ordinary one, two or more for a merge. It is a count rather than a flag
+	// because a combined diff writes one column per parent, and reading one
+	// means knowing how many there are.
+	parents int
 	message string
 }
 
-// commitsIn lists the commits in a range, oldest first — the order they were
-// written, which is the order a reader looks for them in.
-func commitsIn(dir, rng string) ([]commit, error) {
+// commitsIn lists the commits a revision selection picks out, oldest first —
+// the order they were written, which is the order a reader looks for them in.
+func commitsIn(dir string, selection ...string) ([]commit, error) {
 	// NUL separates the entries. A commit message can hold any line at all,
 	// this one's own header included, so nothing that could be typed into one
 	// can be what the entries are split on.
 	const format = "--format=%x00%H %h %P%n%B"
-	out, err := git(dir, "送られるコミット", []string{"log", "--reverse", format, rng})
+	out, err := git(dir, "送られるコミット", append([]string{"log", "--reverse", format}, selection...))
 	if err != nil {
 		return nil, err
 	}
@@ -186,7 +227,7 @@ func commitsIn(dir, rng string) ([]commit, error) {
 			sha:   fields[0],
 			short: fields[1],
 			// Everything after the commit and its abbreviation is its parents.
-			merge:   len(fields) > 3,
+			parents: len(fields) - 2,
 			message: strings.TrimRight(message, "\n"),
 		})
 	}
@@ -199,9 +240,32 @@ func changes(dir, sha string) ([]Text, []string, error) {
 	// diff-tree rather than show: it answers with the diff and nothing else,
 	// so no header has to be trimmed back off. --root is what makes a commit
 	// with no parent answer at all, instead of answering with nothing.
-	base := []string{"diff-tree", "--root", "--no-commit-id", "-r", sha}
+	return diffTree(dir, []string{"diff-tree", "--root", "--no-commit-id", "-r", sha})
+}
 
-	out, err := git(dir, "送られるコミット", append([]string{}, append(base, "--name-only", "-z")...))
+// resolutions reads what a merge commit holds that none of its parents do —
+// the lines someone typed while resolving a conflict, and the files they are
+// in.
+//
+// --cc is what asks that question: it drops any file whose result matches a
+// parent, and inside the ones left it shows only the hunks that differ from
+// every parent. A merge that went through cleanly answers with nothing at all,
+// so this adds no surface where there was no hand in it.
+//
+// The alternative — the first-parent diff — would drag in everything the merge
+// took from the other side, all of it already judged as the commits it came
+// from, and much of it already on the remote.
+func resolutions(dir, sha string) ([]Text, []string, error) {
+	return diffTree(dir, []string{"diff-tree", "--cc", "--no-commit-id", "-r", sha})
+}
+
+// diffTree runs one diff-tree two ways — for the paths, and for the body — and
+// answers with the lines it adds and the paths it touches.
+//
+// The paths are asked for separately, NUL-separated, rather than read out of
+// the diff's own headers: that answer is exact whatever a path is spelled with.
+func diffTree(dir string, base []string) ([]Text, []string, error) {
+	out, err := git(dir, "送られるコミット", append(append([]string{}, base...), "--name-only", "-z"))
 	if err != nil {
 		return nil, nil, err
 	}
@@ -212,7 +276,7 @@ func changes(dir, sha string) ([]Text, []string, error) {
 		}
 	}
 
-	body, err := git(dir, "送られるコミット", append([]string{}, append(base, "-p", "-U0")...))
+	body, err := git(dir, "送られるコミット", append(append([]string{}, base...), "-p", "-U0"))
 	if err != nil {
 		return nil, nil, err
 	}
@@ -248,16 +312,27 @@ func diff(dir string, selector []string) ([]Text, []string, error) {
 // addedLines pulls the added lines out of a diff, grouped by the file they are
 // being added to.
 //
-// The `+++ b/…` header and an added line beginning with `++` are told apart by
+// It reads an ordinary diff and a merge's combined diff with one pass, because
+// the diff says which it is: a hunk opens with one more `@` than the commit has
+// parents — `@@` for an ordinary one, `@@@` for a two-parent merge — and that
+// same count is how many columns each line inside carries, one per parent. A
+// column holds `+` when the line is not in that parent, so a line whose columns
+// are all `+` is in none of them. Those are the ones taken: in an ordinary diff
+// that is every added line, and in a merge it is only what was typed by hand.
+//
+// The `+++ b/…` header and an added line beginning with `+++` are told apart by
 // where they are: a header only ever comes before the first `@@` of a file, and
-// every line inside a hunk carries a `+` or `-` in front of it. Matching on the
-// text alone would read `++x` as a filename.
+// every line inside a hunk carries its columns in front of it. Matching on the
+// text alone would read `+++x` as a filename.
 func addedLines(body string) []Text {
 	var (
-		texts  []Text
-		where  string
-		inHunk bool
-		b      strings.Builder
+		texts []Text
+		where string
+		// columns is how wide a line's prefix is inside the hunk being read,
+		// and zero when no hunk is open — the two things a line has to be
+		// judged against, and one answers both.
+		columns int
+		b       strings.Builder
 	)
 	flush := func() {
 		if b.Len() > 0 {
@@ -268,15 +343,18 @@ func addedLines(body string) []Text {
 
 	for _, line := range strings.Split(body, "\n") {
 		switch {
-		case strings.HasPrefix(line, "diff --git "):
+		case strings.HasPrefix(line, "diff --"):
+			// `diff --git` opens an ordinary file, `diff --cc` a combined one.
+			// Nothing inside a hunk can look like either: every line in one
+			// starts with its columns.
 			flush()
-			where, inHunk = "", false
+			where, columns = "", 0
 		case strings.HasPrefix(line, "@@"):
-			inHunk = true
-		case inHunk && strings.HasPrefix(line, "+"):
-			b.WriteString(line[len("+"):])
+			columns = len(line) - len(strings.TrimLeft(line, "@")) - 1
+		case columns > 0 && addedInEveryParent(line, columns):
+			b.WriteString(line[columns:])
 			b.WriteString("\n")
-		case !inHunk && strings.HasPrefix(line, "+++ "):
+		case columns == 0 && strings.HasPrefix(line, "+++ "):
 			// b/ is git's own prefix, not part of the path. A deleted file
 			// says /dev/null here and adds no lines, so it never surfaces.
 			where = strings.TrimPrefix(strings.TrimPrefix(line, "+++ "), "b/")
@@ -284,6 +362,21 @@ func addedLines(body string) []Text {
 	}
 	flush()
 	return texts
+}
+
+// addedInEveryParent reports whether every one of a diff line's columns says
+// the line is new — which for an ordinary diff, having one column, is simply
+// that it is an added line.
+func addedInEveryParent(line string, columns int) bool {
+	if len(line) < columns {
+		return false
+	}
+	for i := 0; i < columns; i++ {
+		if line[i] != '+' {
+			return false
+		}
+	}
+	return true
 }
 
 // appendNew adds the paths that are not in have already, keeping the order they

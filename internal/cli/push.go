@@ -113,8 +113,8 @@ func runPush(args []string, stdout, stderr io.Writer) int {
 		// at is not one.
 		fmt.Fprintf(stderr, "weir push: 何が送られるのかを読み出せないので、プッシュしませんでした。\n\n")
 		fmt.Fprint(stderr, `いまのブランチには upstream がありません。
-weir は「upstream にまだ無いコミット」を送られるものとして見ます。upstream が無いと、
-どこまでが送られるのかが決まらないので、判定できません。
+weir は「送り先のリモートにまだ無いコミット」を送られるものとして見ます。upstream が無いと
+送り先が決まらないので、何が送られるのかも決まりません。
 
 次にすること:
   1. 送り先のブランチが既にリモートにあるなら、送らずに upstream だけを決める:

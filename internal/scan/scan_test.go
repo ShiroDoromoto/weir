@@ -31,6 +31,25 @@ func gitIn(t *testing.T, dir string, args ...string) string {
 	return string(out)
 }
 
+// gitMayFail is gitIn for a command that is meant to fail — a merge that runs
+// into a conflict, which is the only way to set one up to be resolved.
+func gitMayFail(t *testing.T, dir string, args ...string) (string, error) {
+	t.Helper()
+
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(),
+		"GIT_CONFIG_GLOBAL="+os.DevNull,
+		"GIT_CONFIG_SYSTEM="+os.DevNull,
+		"GIT_AUTHOR_NAME=weir test",
+		"GIT_AUTHOR_EMAIL=test@example.invalid",
+		"GIT_COMMITTER_NAME=weir test",
+		"GIT_COMMITTER_EMAIL=test@example.invalid",
+	)
+	out, err := cmd.CombinedOutput()
+	return string(out), err
+}
+
 // newRepo makes a repository with one file already committed.
 func newRepo(t *testing.T) string {
 	t.Helper()
@@ -405,6 +424,134 @@ func TestPushDoesNotJudgeAMergeTwice(t *testing.T) {
 	}
 }
 
+// A conflict is resolved by typing, and what gets typed is in neither parent —
+// so it is in no commit anywhere else, and the merge is the only place it can
+// be seen. Reading merges by message alone let it through.
+func TestPushSeesWhatAMergeResolvedByHand(t *testing.T) {
+	dir := newTracking(t)
+	gitIn(t, dir, "checkout", "-b", "side")
+	commitFile(t, dir, "x.txt", "枝の側\n", "枝で書いた")
+	gitIn(t, dir, "checkout", "main")
+	commitFile(t, dir, "x.txt", "幹の側\n", "幹で書いた")
+
+	// The two sides disagree, so the merge stops and waits to be resolved.
+	if out, err := gitMayFail(t, dir, "merge", "side"); err == nil {
+		t.Fatalf("merge succeeded (%s), want a conflict to resolve", out)
+	}
+	write(t, dir, "x.txt", "AKIAIOSFODNN7EXAMPLE\n")
+	gitIn(t, dir, "add", "x.txt")
+	gitIn(t, dir, "commit", "-m", "手で直した")
+
+	s, err := Push(dir)
+	if err != nil {
+		t.Fatalf("Push() = %v, want no error", err)
+	}
+	// Asked for exactly: a combined diff carries one column per parent, and a
+	// line read one column short would still hold the word a substring check
+	// looks for while carrying a `+` that was never in the file.
+	var found bool
+	for _, txt := range s.Texts {
+		if txt.Where == "コミット "+shortOf(t, dir)+" の x.txt" {
+			found = true
+			if txt.Body != "AKIAIOSFODNN7EXAMPLE\n" {
+				t.Errorf("body = %q, want the resolved line with none of its columns left on it", txt.Body)
+			}
+		}
+	}
+	if !found {
+		t.Errorf("Texts = %+v, want the line the merge resolved by hand", s.Texts)
+	}
+
+	var inPaths bool
+	for _, p := range s.Paths {
+		if p == "x.txt" {
+			inPaths = true
+		}
+	}
+	if !inPaths {
+		t.Errorf("Paths = %v, want the file the resolution is in", s.Paths)
+	}
+}
+
+// A merge that needed no hand has nothing in it that is in neither parent, so
+// it adds nothing at all. Anything else would judge the same work twice — once
+// as the commit that wrote it, once as the merge that carried it — and refuse a
+// push over a line the person cannot find.
+func TestPushAddsNothingForAMergeNobodyTouched(t *testing.T) {
+	dir := newTracking(t)
+	gitIn(t, dir, "checkout", "-b", "side")
+	commitFile(t, dir, "side.txt", "SIDELINE\n", "枝で足した")
+	gitIn(t, dir, "checkout", "main")
+	gitIn(t, dir, "merge", "--no-ff", "-m", "枝を取り込んだ", "side")
+
+	s, err := Push(dir)
+	if err != nil {
+		t.Fatalf("Push() = %v, want no error", err)
+	}
+	if got := strings.Count(bodies(s), "SIDELINE"); got != 1 {
+		t.Errorf("SIDELINE appears %d times, want 1 — the commit that wrote it, and not the merge", got)
+	}
+	if len(s.Paths) != 1 || s.Paths[0] != "side.txt" {
+		t.Errorf("Paths = %v, want only the path the commit changes", s.Paths)
+	}
+}
+
+// A merge can have more than two parents, and a combined diff then carries one
+// more column per line. The count comes off the hunk header rather than being
+// assumed, so three parents read as cleanly as two — an octopus merge someone
+// edited before committing hides a line exactly the same way.
+func TestPushSeesWhatWasTypedIntoAnOctopusMerge(t *testing.T) {
+	dir := newTracking(t)
+	for _, side := range []string{"one", "two"} {
+		gitIn(t, dir, "checkout", "-b", side, "main")
+		commitFile(t, dir, side+".txt", side+"\n", side+" で足した")
+	}
+	gitIn(t, dir, "checkout", "main")
+	// main has to have moved on too. With it still an ancestor of both sides,
+	// the octopus fast-forwards onto one of them first and the result has two
+	// parents, not three.
+	commitFile(t, dir, "main.txt", "main\n", "幹でも足した")
+	// The octopus strategy commits on its own — --no-commit is not open to it —
+	// so the line goes in afterwards, with the parents kept by amending.
+	gitIn(t, dir, "merge", "-m", "二つまとめて取り込んだ", "one", "two")
+	write(t, dir, "a.txt", "one\nAKIAIOSFODNN7EXAMPLE\n")
+	gitIn(t, dir, "add", "a.txt")
+	gitIn(t, dir, "commit", "--amend", "-m", "取り込むついでに書いた")
+
+	// Only worth anything if it really is an octopus: two parents would leave
+	// the extra column untested.
+	if got := len(strings.Fields(gitIn(t, dir, "log", "-1", "--format=%P"))); got != 3 {
+		t.Fatalf("the merge has %d parents, want 3", got)
+	}
+
+	s, err := Push(dir)
+	if err != nil {
+		t.Fatalf("Push() = %v, want no error", err)
+	}
+	// Asked for exactly, not merely contained: read with one column too few, the
+	// line would arrive as "+AKIA…" — still found by a substring check, and
+	// still wrong. The width has to come off the header.
+	var found bool
+	for _, txt := range s.Texts {
+		if txt.Where == "コミット "+shortOf(t, dir)+" の a.txt" {
+			found = true
+			if txt.Body != "AKIAIOSFODNN7EXAMPLE\n" {
+				t.Errorf("body = %q, want the line with none of its columns left on it", txt.Body)
+			}
+		}
+	}
+	if !found {
+		t.Errorf("Texts = %+v, want the line typed into the merge", s.Texts)
+	}
+}
+
+// shortOf is HEAD's abbreviated sha, which is how the surface names a commit.
+func shortOf(t *testing.T, dir string) string {
+	t.Helper()
+
+	return strings.TrimSpace(gitIn(t, dir, "rev-parse", "--short", "HEAD"))
+}
+
 // One file changed by several of these commits is one path. A path rule is
 // about where a change lands, and it lands in one place however many commits
 // carried it there.
@@ -444,6 +591,86 @@ func TestPushWithoutAnUpstreamSaysSo(t *testing.T) {
 	_, err := Push(dir)
 	if !errors.Is(err, ErrNoUpstream) {
 		t.Fatalf("Push() = %v, want ErrNoUpstream", err)
+	}
+}
+
+// A detached HEAD is on no branch, so nothing says where a push would go. Same
+// answer as no upstream — what it must not be is an empty surface, which would
+// read as a clean one.
+func TestPushOnADetachedHeadSaysSo(t *testing.T) {
+	dir := newTracking(t)
+	commitFile(t, dir, "a.txt", "one\ntwo\n", "一つ目")
+	gitIn(t, dir, "checkout", "--detach", "HEAD")
+
+	_, err := Push(dir)
+	if !errors.Is(err, ErrNoUpstream) {
+		t.Fatalf("Push() = %v, want ErrNoUpstream", err)
+	}
+}
+
+// The one this range used to get wrong. `<upstream>..HEAD` means "newer than
+// this branch's upstream", which sweeps in commits the remote already holds by
+// another ref — merge main into a topic branch and main's commits land in it.
+// Refusing over one of those refuses a push over something that left long ago,
+// and there is nothing to fix.
+func TestPushLeavesOutWhatTheRemoteAlreadyHasByAnotherRef(t *testing.T) {
+	dir := newTracking(t)
+	gitIn(t, dir, "checkout", "-b", "topic")
+	commitFile(t, dir, "topic.txt", "TOPICLINE\n", "枝で足した")
+	gitIn(t, dir, "push", "-u", "origin", "topic")
+
+	// main moves on and is pushed, so what it carries is already on the remote.
+	gitIn(t, dir, "checkout", "main")
+	commitFile(t, dir, "main.txt", "ALREADYSENT\n", "幹で足した")
+	gitIn(t, dir, "push", "origin", "main")
+
+	// Taking it into the topic branch does not send it a second time.
+	gitIn(t, dir, "checkout", "topic")
+	gitIn(t, dir, "merge", "--no-ff", "-m", "幹を取り込んだ", "main")
+
+	s, err := Push(dir)
+	if err != nil {
+		t.Fatalf("Push() = %v, want no error", err)
+	}
+	if strings.Contains(bodies(s), "ALREADYSENT") {
+		t.Errorf("surface = %q, want nothing from a commit the remote already has", bodies(s))
+	}
+	if strings.Contains(bodies(s), "幹で足した") {
+		t.Errorf("surface = %q, want no message from a commit the remote already has", bodies(s))
+	}
+	for _, p := range s.Paths {
+		if p == "main.txt" {
+			t.Errorf("Paths = %v, want no path from a commit the remote already has", s.Paths)
+		}
+	}
+	// The merge itself has not been sent, so it is still judged.
+	if !strings.Contains(bodies(s), "幹を取り込んだ") {
+		t.Errorf("surface = %q, want the merge commit's own message", bodies(s))
+	}
+}
+
+// Fetching from one remote and pushing to another is a configuration git
+// supports, and the two are different sets of commits. The surface has to be
+// measured against the one being pushed to: measuring against the fetch remote
+// would drop commits the destination has never seen, which is the direction
+// weir must not fail in.
+func TestPushMeasuresAgainstThePushRemoteNotTheFetchRemote(t *testing.T) {
+	dir := newTracking(t)
+	commitFile(t, dir, "sent.txt", "ONLYONORIGIN\n", "origin にだけ送ったもの")
+	gitIn(t, dir, "push", "origin", "main")
+
+	// A second remote that has never seen any of this, set as where main pushes.
+	other := filepath.Join(t.TempDir(), "other.git")
+	gitIn(t, dir, "init", "--bare", other)
+	gitIn(t, dir, "remote", "add", "other", other)
+	gitIn(t, dir, "config", "branch.main.pushRemote", "other")
+
+	s, err := Push(dir)
+	if err != nil {
+		t.Fatalf("Push() = %v, want no error", err)
+	}
+	if !strings.Contains(bodies(s), "ONLYONORIGIN") {
+		t.Errorf("surface = %q, want a commit the push remote does not have", bodies(s))
 	}
 }
 
