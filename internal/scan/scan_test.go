@@ -743,3 +743,91 @@ func TestPushFailsOutsideARepository(t *testing.T) {
 		t.Errorf("error = %q, want it to name what failed", err)
 	}
 }
+
+// A tag carries its own name and, when it is annotated, its own message. Both
+// go out with the push and neither is in any commit, so nothing else would have
+// looked at them.
+func TestTagReadsItsNameAndMessage(t *testing.T) {
+	dir := newTracking(t)
+	gitIn(t, dir, "tag", "-a", "v0.3.0", "-m", "山田太郎さんの分を含む")
+
+	s, err := Tag(dir, "origin", "v0.3.0")
+	if err != nil {
+		t.Fatalf("Tag() = %v, want no error", err)
+	}
+	if !strings.Contains(bodies(s), "v0.3.0") {
+		t.Errorf("surface = %q, want the tag's own name", bodies(s))
+	}
+	if !strings.Contains(bodies(s), "山田太郎") {
+		t.Errorf("surface = %q, want the tag's own message", bodies(s))
+	}
+	if !strings.Contains(wheres(s), TagNameWhere) {
+		t.Errorf("wheres = %q, want the name to be named as the name", wheres(s))
+	}
+}
+
+// A lightweight tag has no message of its own. What it points at has one, but
+// that is the commit's — read as the tag's, a refusal would name a message
+// nobody wrote on a tag. The name is still there, so the surface is never empty.
+func TestTagWithoutAMessageStillCarriesItsName(t *testing.T) {
+	dir := newTracking(t)
+	commitFile(t, dir, "lightweight.txt", "one\n", "COMMITMESSAGE")
+	gitIn(t, dir, "push", "origin", "main")
+	gitIn(t, dir, "tag", "v0.3.0")
+
+	s, err := Tag(dir, "origin", "v0.3.0")
+	if err != nil {
+		t.Fatalf("Tag() = %v, want no error", err)
+	}
+	if !strings.Contains(bodies(s), "v0.3.0") {
+		t.Errorf("surface = %q, want the tag's own name", bodies(s))
+	}
+	if strings.Contains(bodies(s), "COMMITMESSAGE") {
+		t.Errorf("surface = %q, want the commit's message left out of the tag's", bodies(s))
+	}
+}
+
+// Pushing a tag pushes whatever the destination needs to hold it. Tag a commit
+// that has not been sent and the push takes it along, so judging only the tag
+// would pass that commit unlooked at.
+func TestTagCarriesTheCommitsTheRemoteDoesNotHave(t *testing.T) {
+	dir := newTracking(t)
+	commitFile(t, dir, "a.txt", "NEVERSENT\n", "まだ送っていない")
+	gitIn(t, dir, "tag", "-a", "v0.3.0", "-m", "v0.3.0")
+
+	s, err := Tag(dir, "origin", "v0.3.0")
+	if err != nil {
+		t.Fatalf("Tag() = %v, want no error", err)
+	}
+	if !strings.Contains(bodies(s), "NEVERSENT") {
+		t.Errorf("surface = %q, want the commit the tag would carry", bodies(s))
+	}
+}
+
+// The ordinary release: the branch went out first, so the tag carries nothing
+// but itself.
+func TestTagOnAnAlreadySentCommitCarriesNoCommits(t *testing.T) {
+	dir := newTracking(t)
+	commitFile(t, dir, "a.txt", "ALREADYSENT\n", "送った")
+	gitIn(t, dir, "push", "origin", "main")
+	gitIn(t, dir, "tag", "-a", "v0.3.0", "-m", "v0.3.0")
+
+	s, err := Tag(dir, "origin", "v0.3.0")
+	if err != nil {
+		t.Fatalf("Tag() = %v, want no error", err)
+	}
+	if strings.Contains(bodies(s), "ALREADYSENT") {
+		t.Errorf("surface = %q, want nothing from a commit the remote already has", bodies(s))
+	}
+}
+
+// A tag that is not there is not an empty surface. Nothing to send and nothing
+// to find are different answers, and only one of them means a push should
+// happen.
+func TestTagThatIsNotThereSaysSo(t *testing.T) {
+	dir := newTracking(t)
+
+	if _, err := Tag(dir, "origin", "v9.9.9"); !errors.Is(err, ErrNoSuchTag) {
+		t.Fatalf("Tag() = %v, want ErrNoSuchTag", err)
+	}
+}

@@ -242,7 +242,7 @@ value = "AKIA[0-9A-Z]{16}"
 	if strings.Contains(said, "AKIAIOSFODNN7EXAMPLE") {
 		t.Errorf("stderr = %q, want it not to repeat what matched", said)
 	}
-	for _, want := range []string{"次にすること", pushExample} {
+	for _, want := range []string{"次にすること", fmt.Sprintf(pushFormat, "weir")} {
 		if !strings.Contains(said, want) {
 			t.Errorf("stderr = %q, want it to carry %q", said, want)
 		}

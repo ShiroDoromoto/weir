@@ -81,7 +81,7 @@ func TestPushRefusesAndSaysHow(t *testing.T) {
 		{
 			name:      "an option weir does not have",
 			args:      []string{"push", "--repo", "weir", "--force"},
-			wantCause: "--repo / --here だけ",
+			wantCause: "--repo / --tag / --here だけ",
 		},
 		{
 			name:      "a destination, which weir does not take",
@@ -257,5 +257,119 @@ func TestPushHelpPrintsItsUsage(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "--repo") {
 		t.Errorf("stdout = %q, want it to describe the options", stdout.String())
+	}
+}
+
+// newTagged makes a repository whose branch is already on its remote — the
+// ordinary release, where the tag is all that is left to send — and answers
+// with the working tree and the bare repository it pushes to.
+func newTagged(t *testing.T) (dir, bare string) {
+	t.Helper()
+
+	dir = newRepo(t)
+	pushGit(t, dir, "commit", "--message", "一つ目")
+	bare = filepath.Join(t.TempDir(), "origin.git")
+	pushGit(t, dir, "init", "--bare", bare)
+	pushGit(t, dir, "remote", "add", "origin", bare)
+	pushGit(t, dir, "push", "-u", "origin", "main")
+	return dir, bare
+}
+
+// A tag's message goes out with the push and is in no commit, so nothing else
+// would have looked at it.
+func TestPushTagIsRefusedByAWordInTheTagMessage(t *testing.T) {
+	dir, bare := newTagged(t)
+	pushGit(t, dir, "tag", "-a", "v0.3.0", "-m", "山田太郎さんの分を含む")
+	withStore(t, fmt.Sprintf("[repos.weir]\npath = %q\n", dir), "山田太郎\n")
+
+	var stdout, stderr bytes.Buffer
+	code := Run([]string{"push", "--repo", "weir", "--tag", "v0.3.0"}, &stdout, &stderr)
+	if code != exitFailure {
+		t.Fatalf("exit code = %d, want %d (stderr: %s)", code, exitFailure, stderr.String())
+	}
+	// The tag must not have left.
+	if out := pushGit(t, bare, "tag", "-l"); strings.Contains(out, "v0.3.0") {
+		t.Errorf("the remote has the tag, want the refusal to have stopped the push")
+	}
+	if strings.Contains(stderr.String(), "山田太郎") {
+		t.Errorf("stderr = %q, want it not to repeat what matched", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "v0.3.0") {
+		t.Errorf("stderr = %q, want it to name which tag it was", stderr.String())
+	}
+}
+
+// The tag's own name goes out too, and a name is as easy to put in a tag as in
+// a message. The refusal must not print it back.
+func TestPushTagIsRefusedByAWordInTheTagName(t *testing.T) {
+	dir, _ := newTagged(t)
+	pushGit(t, dir, "tag", "-a", "山田太郎-review", "-m", "レビュー用")
+	withStore(t, fmt.Sprintf("[repos.weir]\npath = %q\n", dir), "山田太郎\n")
+
+	var stdout, stderr bytes.Buffer
+	code := Run([]string{"push", "--repo", "weir", "--tag", "山田太郎-review"}, &stdout, &stderr)
+	if code != exitFailure {
+		t.Fatalf("exit code = %d, want %d (stderr: %s)", code, exitFailure, stderr.String())
+	}
+	if strings.Contains(stderr.String(), "山田太郎") {
+		t.Errorf("stderr = %q, want the word gone even though it is the tag's own name", stderr.String())
+	}
+}
+
+// Nothing matched, so the tag goes — to the destination weir judged against.
+func TestPushTagGoesThroughWhenNothingMatches(t *testing.T) {
+	dir, bare := newTagged(t)
+	pushGit(t, dir, "tag", "-a", "v0.3.0", "-m", "v0.3.0")
+	withStore(t, fmt.Sprintf("[repos.weir]\npath = %q\n", dir), "山田太郎\n")
+
+	var stdout, stderr bytes.Buffer
+	code := Run([]string{"push", "--repo", "weir", "--tag", "v0.3.0"}, &stdout, &stderr)
+	if code != exitOK {
+		t.Fatalf("exit code = %d, want %d (stderr: %s)", code, exitOK, stderr.String())
+	}
+	if out := pushGit(t, bare, "tag", "-l"); !strings.Contains(out, "v0.3.0") {
+		t.Errorf("the remote has no tag, so the push never reached it")
+	}
+}
+
+// A tag that is not there is a name typed wrong, not an empty surface. Sending
+// nothing and reporting success would tell the person it went.
+func TestPushTagThatIsNotThereRefuses(t *testing.T) {
+	dir, _ := newTagged(t)
+	withConfig(t, fmt.Sprintf("[repos.weir]\npath = %q\n", dir))
+
+	var stdout, stderr bytes.Buffer
+	code := Run([]string{"push", "--repo", "weir", "--tag", "v9.9.9"}, &stdout, &stderr)
+	if code != exitUsage {
+		t.Fatalf("exit code = %d, want %d (stderr: %s)", code, exitUsage, stderr.String())
+	}
+	for _, want := range []string{"v9.9.9", "git tag -a"} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Errorf("stderr = %q, want it to carry %q", stderr.String(), want)
+		}
+	}
+}
+
+// Pushing a tag pushes what the destination needs to hold it. A commit that has
+// never been sent rides along, so it is judged like any other commit going out.
+func TestPushTagJudgesTheCommitsItWouldCarry(t *testing.T) {
+	dir, bare := newTagged(t)
+	if err := os.WriteFile(filepath.Join(dir, "b.txt"), []byte("AKIAIOSFODNN7EXAMPLE\n"), 0o644); err != nil {
+		t.Fatalf("could not write b.txt: %v", err)
+	}
+	pushGit(t, dir, "add", "b.txt")
+	pushGit(t, dir, "commit", "--message", "まだ送っていない")
+	pushGit(t, dir, "tag", "-a", "v0.3.0", "-m", "v0.3.0")
+	withStore(t, fmt.Sprintf(
+		"[repos.weir]\npath = %q\n\n[[rules]]\ntype = \"pattern\"\nvalue = \"AKIA[0-9A-Z]{16}\"\naction = \"block\"\n",
+		dir), "")
+
+	var stdout, stderr bytes.Buffer
+	code := Run([]string{"push", "--repo", "weir", "--tag", "v0.3.0"}, &stdout, &stderr)
+	if code != exitFailure {
+		t.Fatalf("exit code = %d, want %d (stderr: %s)", code, exitFailure, stderr.String())
+	}
+	if out := pushGit(t, bare, "tag", "-l"); strings.Contains(out, "v0.3.0") {
+		t.Errorf("the remote has the tag, want the commit it carries to have stopped it")
 	}
 }

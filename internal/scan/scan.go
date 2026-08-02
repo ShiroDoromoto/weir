@@ -127,14 +127,91 @@ func Commit(dir, message string, all bool) (Surface, error) {
 // which are in this set too. What is left over, and in no commit anywhere, is
 // what someone typed while resolving a conflict.
 func Push(dir string) (Surface, error) {
-	remote, err := destinationOf(dir)
+	remote, err := Destination(dir)
+	if err != nil {
+		return Surface{}, err
+	}
+	return carried(dir, remote, "HEAD")
+}
+
+// TagNameWhere is what Where says for the name of the tag being pushed. The
+// name itself is the body, so a rule can match it — and a refusal says only
+// that it was the name, never what it was.
+const TagNameWhere = "タグ名"
+
+// ErrNoSuchTag is a tag that is not there to be pushed. It is told apart from
+// an empty surface: nothing to send and nothing to find are different answers,
+// and only one of them means a push should happen.
+var ErrNoSuchTag = errors.New("そのタグがありません")
+
+// Tag assembles what `weir push --tag` in dir would send: the tag's own name
+// and, when it is an annotated tag, its message — plus the commits the tag
+// carries that the destination does not have yet.
+//
+// The commits are part of it because pushing a tag pushes whatever the
+// destination needs in order to hold it. Tag an unpushed commit and the push
+// takes that commit along; judging only the tag would pass it unlooked at.
+// Where they are already on the remote — the ordinary release, tagged after
+// the branch went out — that set is empty and the tag stands alone.
+//
+// A lightweight tag has no message of its own. What it points at has one, but
+// that is the commit's, judged as a commit; reading it as the tag's would have
+// a refusal name a message nobody wrote on a tag.
+func Tag(dir, remote, name string) (Surface, error) {
+	annotated, message, err := tagOf(dir, name)
 	if err != nil {
 		return Surface{}, err
 	}
 
+	s, err := carried(dir, remote, name)
+	if err != nil {
+		return Surface{}, err
+	}
+	// The name goes first: it is the one part every tag has, so the surface is
+	// never empty and can never be mistaken for a clean one.
+	texts := []Text{{Where: TagNameWhere, Body: name}}
+	if annotated {
+		texts = append(texts, Text{Where: "タグ " + name + " のメッセージ", Body: message})
+	}
+	s.Texts = append(texts, s.Texts...)
+	return s, nil
+}
+
+// tagOf reads a tag: whether it is annotated, and the message if it is.
+func tagOf(dir, name string) (annotated bool, message string, err error) {
+	// rev-parse first, and on the full ref: it reads the name literally, so a
+	// name that is not there answers "not there" rather than being matched as
+	// a pattern by what comes next.
+	ref := "refs/tags/" + name
+	if _, err := git(dir, "タグ", []string{"rev-parse", "--verify", "--quiet", ref}); err != nil {
+		return false, "", ErrNoSuchTag
+	}
+
+	// %(objecttype) is `tag` for an annotated tag and `commit` for a
+	// lightweight one, which is the whole difference between having a message
+	// and only appearing to.
+	//
+	// A space separates them, not a NUL: for-each-ref does not read %x00 the
+	// way git log does — it prints those four characters — and an object type
+	// is one word of `commit` / `tag` / `tree` / `blob`, so the first space is
+	// the only one that could be the separator.
+	out, err := git(dir, "タグ", []string{"for-each-ref", "--format=%(objecttype) %(contents)", ref})
+	if err != nil {
+		return false, "", err
+	}
+	kind, contents, _ := strings.Cut(out, " ")
+	if kind != "tag" {
+		return false, "", nil
+	}
+	return true, strings.TrimRight(contents, "\n"), nil
+}
+
+// carried assembles the commits a push of rev would send to remote — the ones
+// the remote does not have — with each one's message and what it changes.
+func carried(dir, remote, rev string) (Surface, error) {
 	// A trailing /* is what --remotes= means by a name with no glob in it.
 	// Writing it out keeps the pattern readable as the pattern it is.
-	commits, err := commitsIn(dir, "HEAD", "--not", "--remotes="+remote+"/*")
+	commits, err := commitsIn(dir, rev, "--not", "--remotes="+remote+"/*")
 	if err != nil {
 		return Surface{}, err
 	}
@@ -162,7 +239,7 @@ func Push(dir string) (Surface, error) {
 	return s, nil
 }
 
-// destinationOf names the remote a push from dir would go to. A branch that
+// Destination names the remote a push from dir would go to. A branch that
 // says nothing about where it pushes falls back to soleRemote.
 //
 // It asks for %(push:remotename) rather than %(upstream:remotename) because
@@ -171,7 +248,7 @@ func Push(dir string) (Surface, error) {
 // subtracting what is on the fetch remote would drop commits the push remote
 // has never seen out of the surface, which is the one direction weir must not
 // fail in.
-func destinationOf(dir string) (string, error) {
+func Destination(dir string) (string, error) {
 	// Whether this is a repository at all is asked first, so a failure to
 	// answer the destination question can only be about the destination — and
 	// the caller outside a repository is told that, rather than being told its

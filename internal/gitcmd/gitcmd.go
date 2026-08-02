@@ -33,6 +33,19 @@ func Push(dir string, stdout, stderr io.Writer) error {
 	return run(dir, []string{"push"}, stdout, stderr)
 }
 
+// PushTag sends one tag from the repository at dir to remote.
+//
+// The remote is named here, unlike Push, because a tag has no upstream to
+// follow — but it is not the caller's to choose: it is the destination weir
+// worked the surface out against. Passing a different one would send the tag
+// somewhere other than where the judging was done.
+//
+// `tag <name>` rather than the bare name: a refspec that is only a name is
+// ambiguous when a branch shares it, and this says which one is meant.
+func PushTag(dir, remote, name string, stdout, stderr io.Writer) error {
+	return run(dir, []string{"push", remote, "tag", name}, stdout, stderr)
+}
+
 // run runs git in dir and reports whether it succeeded.
 func run(dir string, args []string, stdout, stderr io.Writer) error {
 	cmd := exec.Command("git", args...)
